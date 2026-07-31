@@ -257,7 +257,11 @@ import {
   __resetSshWorktreeCreateFetchCacheForTests,
   notifyWorktreesChanged
 } from './worktree-remote'
-import { invalidateAuthorizedRootsCache, resolveRegisteredWorktreePath } from './filesystem-auth'
+import {
+  invalidateAuthorizedRootsCache,
+  registerWorktreeRootsForRepo,
+  resolveRegisteredWorktreePath
+} from './filesystem-auth'
 import {
   reviewHeadRemoteRefComponent,
   REVIEW_HEAD_FETCH_TIMEOUT_MS
@@ -10107,6 +10111,22 @@ describe('registerWorktreeHandlers', () => {
 
     it('forgets an ownerless workspace after its repo is already gone', async () => {
       const worktreeId = 'repo-gone::/workspace/feature-wt'
+      const worktreePath = '/workspace/feature-wt'
+      // Seed authorized roots while the owning repo still exists, then let it disappear.
+      store.getRepos.mockReturnValue([
+        {
+          id: 'repo-gone',
+          path: '/workspace/gone',
+          displayName: 'gone',
+          badgeColor: '#000',
+          addedAt: 0
+        }
+      ])
+      registerWorktreeRootsForRepo(store as never, 'repo-gone', [worktreePath])
+      await expect(resolveRegisteredWorktreePath(worktreePath, store as never)).resolves.toBe(
+        resolve(worktreePath)
+      )
+      store.getRepos.mockReturnValue([])
       store.getRepo.mockReturnValue(undefined)
 
       await expect(
@@ -10116,11 +10136,11 @@ describe('registerWorktreeHandlers', () => {
         })
       ).resolves.toEqual({})
 
-      expect(store.removeWorktreeMeta).toHaveBeenCalledWith(worktreeId)
-      expect(store.removeWorkspaceSessionStateForWorktree).toHaveBeenCalledWith(
-        worktreeId,
-        'runtime:env-1'
+      // The whole point: a forgotten workspace must not stay filesystem-authorized via cached roots.
+      await expect(resolveRegisteredWorktreePath(worktreePath, store as never)).rejects.toThrow(
+        'Access denied: unknown repository or worktree path'
       )
+      expect(store.removeWorktreeMeta).toHaveBeenCalledWith(worktreeId, 'runtime:env-1')
       expect(runtimeStub.clearOptimisticReconcileToken).toHaveBeenCalledWith(worktreeId)
       expect(mainWindow.webContents.send).toHaveBeenCalledWith('worktrees:changed', {
         repoId: 'repo-gone'
