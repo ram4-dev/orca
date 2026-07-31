@@ -1138,6 +1138,7 @@ export class SshRelaySession {
         isReplay?: unknown
         providerSession?: unknown
         providerSessionOnly?: unknown
+        claudeRunningShellOrMonitor?: unknown
         payload?: unknown
       }
       if (typeof envelope.paneKey !== 'string') {
@@ -1166,6 +1167,10 @@ export class SshRelaySession {
           isReplay: envelope.isReplay === true ? true : undefined,
           providerSession: envelope.providerSession,
           providerSessionOnly: envelope.providerSessionOnly === true ? true : undefined,
+          claudeRunningShellOrMonitor:
+            typeof envelope.claudeRunningShellOrMonitor === 'boolean'
+              ? envelope.claudeRunningShellOrMonitor
+              : undefined,
           payload: envelope.payload
         },
         this.targetId
