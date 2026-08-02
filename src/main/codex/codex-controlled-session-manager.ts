@@ -10,6 +10,11 @@ import type { ControlledCodexSession } from './codex-controlled-session-registry
 import { createControlledSessionFence } from './codex-controlled-session-fence'
 import { CodexControlledTurnFinalizer } from './codex-controlled-turn-finalizer'
 import {
+  isMissingControlledThreadError,
+  parseControlledThread,
+  type ControlledThreadShape
+} from './codex-controlled-thread-response'
+import {
   getControlledSocketRoot,
   resolveControlledCodexCommand,
   type ControlledCodexCommand,
@@ -51,7 +56,6 @@ type ControlledTerminalLaunch = {
   env: Record<string, string>
   conversationId: string
   threadId: string
-  presentation: 'focused'
 }
 
 export type CodexControlledSessionManagerOptions = {
@@ -67,7 +71,16 @@ export type CodexControlledSessionManagerOptions = {
   waitForVisibleTerminal: (
     terminal: CodexControlledSessionIdentity
   ) => Promise<CodexControlledSessionIdentity>
+  waitForVisibleRemoteAttachment: (
+    terminal: CodexControlledSessionIdentity,
+    proof: {
+      assertControllerAlive: () => void
+      assertRemoteTransportLive: () => void
+      waitForRemoteTransport: (signal: AbortSignal) => Promise<void>
+    }
+  ) => Promise<CodexControlledSessionIdentity>
   closeVisibleTerminal: (terminal: CodexControlledSessionIdentity) => Promise<void>
+  ensureVisibleTerminalStopped: (terminal: CodexControlledSessionIdentity) => Promise<void>
   resolveCurrentAccountId: () => string | null
   resolveCurrentAccountRevision?: () => number
   isControlledLaunchEnabled?: () => boolean
@@ -77,10 +90,6 @@ export type CodexControlledSessionManagerOptions = {
   socketRoot?: string
   spawnProcess?: typeof spawn
 }
-
-type ThreadShape = { status?: { type?: unknown }; canAcceptDirectInput?: unknown }
-
-const CODEX_THREAD_NOT_FOUND_RPC_CODE = -32600
 
 export class CodexControlledSessionManager implements ConversationWakeProvider {
   readonly id = 'codex-controlled'
@@ -97,6 +106,7 @@ export class CodexControlledSessionManager implements ConversationWakeProvider {
         if (!this.isProviderAvailable()) {
           throw new Error('controlled Codex wake is disabled')
         }
+        session.visibleTransport.assertLive()
         this.assertAccountCurrent(session)
       },
       (input) => this.assertLaunchAllowed(input)
@@ -143,11 +153,11 @@ export class CodexControlledSessionManager implements ConversationWakeProvider {
     try {
       const terminal = await this.registry.refresh(session)
       if (!fence()) {
-        return 'unknown'
+        return getUnavailableSessionState(session)
       }
       const thread = await this.readThread(session, false)
       if (!fence()) {
-        return 'unknown'
+        return getUnavailableSessionState(session)
       }
       session.terminal = terminal
       if (thread.status?.type === 'active') {
@@ -157,10 +167,13 @@ export class CodexControlledSessionManager implements ConversationWakeProvider {
         ? 'idle'
         : 'unsupported'
     } catch (error) {
-      if (!fence()) {
-        return 'unknown'
+      if (session.missing) {
+        return 'missing'
       }
-      return isMissingThreadError(error) ? 'missing' : 'unknown'
+      if (!fence()) {
+        return getUnavailableSessionState(session)
+      }
+      return isMissingControlledThreadError(error) ? 'missing' : 'unknown'
     }
   }
 
@@ -207,7 +220,7 @@ export class CodexControlledSessionManager implements ConversationWakeProvider {
             }
             session.terminal = terminal
           } catch (error) {
-            if (isMissingThreadError(error) && fence()) {
+            if (isMissingControlledThreadError(error) && fence()) {
               session.missing = true
             }
           }
@@ -231,19 +244,12 @@ export class CodexControlledSessionManager implements ConversationWakeProvider {
   private async readThread(
     session: ControlledCodexSession,
     includeTurns: boolean
-  ): Promise<ThreadShape> {
+  ): Promise<ControlledThreadShape> {
     const response = await session.client.request('thread/read', {
       threadId: session.launch.threadId,
       includeTurns
     })
-    if (
-      !isRecord(response) ||
-      !isRecord(response.thread) ||
-      response.thread.id !== session.launch.threadId
-    ) {
-      throw new Error('controlled Codex thread/read returned an invalid response')
-    }
-    return response.thread as ThreadShape
+    return parseControlledThread(response, session.launch.threadId)
   }
 
   private observeNotification(
@@ -313,14 +319,6 @@ export class CodexControlledSessionManager implements ConversationWakeProvider {
   }
 }
 
-function isMissingThreadError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    ((error as Error & { rpcCode?: unknown }).rpcCode === CODEX_THREAD_NOT_FOUND_RPC_CODE ||
-      /thread.*(?:not found|missing)|rollout.*not found/i.test(error.message))
-  )
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+function getUnavailableSessionState(session: ControlledCodexSession): 'missing' | 'unknown' {
+  return session.visibleTransport.isLive() ? 'unknown' : 'missing'
 }

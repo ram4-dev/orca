@@ -12,6 +12,7 @@ import {
 const savedEnv = {
   runtime: process.env.ORCA_WAKE_DEV_RUNTIME,
   command: process.env.ORCA_PACKAGED_COMMAND_NAME,
+  cliBin: process.env.ORCA_PACKAGED_CLI_BIN_PATH,
   socketRoot: process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT
 }
 
@@ -19,12 +20,13 @@ afterEach(() => {
   configureWakeDevBuildFlavor({} as never, false)
   restoreEnv('ORCA_WAKE_DEV_RUNTIME', savedEnv.runtime)
   restoreEnv('ORCA_PACKAGED_COMMAND_NAME', savedEnv.command)
+  restoreEnv('ORCA_PACKAGED_CLI_BIN_PATH', savedEnv.cliBin)
   restoreEnv('ORCA_CONTROLLED_CODEX_SOCKET_ROOT', savedEnv.socketRoot)
 })
 
 describe('wake-dev build flavor', () => {
   it('leaves the official app paths and environment untouched by default', () => {
-    const app = { getPath: vi.fn(), setPath: vi.fn() }
+    const app = { getPath: vi.fn(), setPath: vi.fn(), isPackaged: false }
     process.env.ORCA_WAKE_DEV_RUNTIME = '1'
     const before = { ...process.env }
 
@@ -36,15 +38,30 @@ describe('wake-dev build flavor', () => {
     expect(isWakeDevRuntime()).toBe(false)
   })
 
+  it('clears inherited packaged branding when Wake Dev is disabled', () => {
+    process.env.ORCA_PACKAGED_COMMAND_NAME = 'orca-wake'
+    process.env.ORCA_PACKAGED_CLI_BIN_PATH = '/stale/orca-wake'
+
+    configureWakeDevBuildFlavor({} as never, false)
+
+    expect(process.env.ORCA_PACKAGED_COMMAND_NAME).toBeUndefined()
+    expect(process.env.ORCA_PACKAGED_CLI_BIN_PATH).toBeUndefined()
+  })
+
   it('isolates packaged state, cache, logs, crashes, runtime, CLI, and sockets', () => {
     const appData = mkdtempSync(join(tmpdir(), 'orca-wake-dev-flavor-'))
     const app = {
       getPath: vi.fn(() => appData),
-      setPath: vi.fn()
+      setPath: vi.fn(),
+      isPackaged: true
     }
 
     try {
-      configureWakeDevBuildFlavor(app as never, true)
+      configureWakeDevBuildFlavor(
+        app as never,
+        true,
+        '/Applications/Orca Wake Dev.app/Contents/Resources'
+      )
 
       const root = join(appData, WAKE_DEV_PROFILE_DIRECTORY)
       expect(app.setPath.mock.calls).toEqual([
@@ -55,8 +72,28 @@ describe('wake-dev build flavor', () => {
         ['temp', join(root, 'runtime')]
       ])
       expect(process.env.ORCA_PACKAGED_COMMAND_NAME).toBe(WAKE_DEV_CLI_COMMAND)
+      expect(process.env.ORCA_PACKAGED_CLI_BIN_PATH).toBe(
+        '/Applications/Orca Wake Dev.app/Contents/Resources/bin/orca-wake'
+      )
       expect(process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT).toMatch(/^\/tmp\/ocw-wake-/)
       expect(isWakeDevRuntime()).toBe(true)
+    } finally {
+      rmSync(appData, { recursive: true, force: true })
+    }
+  })
+
+  it('does not advertise a packaged launcher in an unpackaged Wake Dev runtime', () => {
+    const appData = mkdtempSync(join(tmpdir(), 'orca-wake-dev-source-'))
+    delete process.env.ORCA_PACKAGED_COMMAND_NAME
+    delete process.env.ORCA_PACKAGED_CLI_BIN_PATH
+    try {
+      configureWakeDevBuildFlavor(
+        { getPath: () => appData, setPath: vi.fn(), isPackaged: false } as never,
+        true,
+        '/unused/resources'
+      )
+      expect(process.env.ORCA_PACKAGED_COMMAND_NAME).toBeUndefined()
+      expect(process.env.ORCA_PACKAGED_CLI_BIN_PATH).toBeUndefined()
     } finally {
       rmSync(appData, { recursive: true, force: true })
     }

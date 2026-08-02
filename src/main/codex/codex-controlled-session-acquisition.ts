@@ -16,11 +16,13 @@ import type {
   CodexControlledSessionIdentity,
   CodexControlledSessionManagerOptions
 } from './codex-controlled-session-manager'
+import type { ControlledVisibleTransport } from './codex-controlled-visible-transport'
 
 export type ControlledCodexSession = {
   launch: CodexControlledSessionLaunch
   socketPath: string
   server: ControlledCodexServer
+  visibleTransport: ControlledVisibleTransport
   client: CodexUnixAppServerClient
   state: CodexControlledSessionStateStore
   terminal: CodexControlledSessionIdentity
@@ -57,18 +59,18 @@ export async function connectControlledCodexClient(
 export async function createReadyControlledTerminal(
   options: CodexControlledSessionManagerOptions,
   input: CodexControlledSessionLaunch,
-  socketPath: string,
+  visibleTransport: ControlledVisibleTransport,
   command: ControlledCodexCommand,
-  onCreated: (identity: CodexControlledSessionIdentity) => void
+  onCreated: (identity: CodexControlledSessionIdentity) => void,
+  server: ControlledCodexServer
 ): Promise<CodexControlledSessionIdentity> {
   const terminal = await options.createVisibleTerminal({
     worktreeSelector: input.worktreeSelector,
-    command: buildControlledVisibleResumeCommand(input, socketPath, command),
+    command: buildControlledVisibleResumeCommand(input, visibleTransport.socketPath, command),
     cwd: input.cwd,
     env: { CODEX_HOME: input.codexHome },
     conversationId: input.conversationId,
-    threadId: input.threadId,
-    presentation: 'focused'
+    threadId: input.threadId
   })
   const cleanupIdentity: CodexControlledSessionIdentity = {
     conversationId: input.conversationId,
@@ -92,7 +94,11 @@ export async function createReadyControlledTerminal(
     }
     onCreated(identity)
     ownedByCaller = true
-    return options.waitForVisibleTerminal(identity)
+    return options.waitForVisibleRemoteAttachment(identity, {
+      assertControllerAlive: () => assertControlledServerAlive(server),
+      assertRemoteTransportLive: visibleTransport.assertLive,
+      waitForRemoteTransport: visibleTransport.waitForLive
+    })
   } catch (error) {
     if (!ownedByCaller) {
       try {
@@ -105,11 +111,18 @@ export async function createReadyControlledTerminal(
   }
 }
 
+export function assertControlledServerAlive(server: ControlledCodexServer): void {
+  if (server.process.exitCode != null || server.process.signalCode != null) {
+    throw new Error('controlled Codex app-server exited before remote attachment')
+  }
+}
+
 export function createControlledCodexSession(params: {
   options: CodexControlledSessionManagerOptions
   launch: CodexControlledSessionLaunch
   socketPath: string
   server: ControlledCodexServer
+  visibleTransport: ControlledVisibleTransport
   client: CodexUnixAppServerClient
   terminal: CodexControlledSessionIdentity
   onNotification: (
@@ -123,6 +136,7 @@ export function createControlledCodexSession(params: {
     launch: params.launch,
     socketPath: params.socketPath,
     server: params.server,
+    visibleTransport: params.visibleTransport,
     client: params.client,
     terminal: params.terminal,
     state: new CodexControlledSessionStateStore(
@@ -141,6 +155,10 @@ export function createControlledCodexSession(params: {
     params.onNotification(session, method, notification)
   )
   params.server.process.once('exit', () => {
+    session.missing = true
+    params.onMissing(params.launch.conversationId)
+  })
+  params.visibleTransport.onDisconnect(() => {
     session.missing = true
     params.onMissing(params.launch.conversationId)
   })

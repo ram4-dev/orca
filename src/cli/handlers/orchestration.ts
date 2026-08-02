@@ -99,9 +99,14 @@ type OrchestrationSendResult =
       lifecycle?: { action: 'completed' | 'failed' }
     }
 
-function resolveCompatibilityCliCommand(): 'orca' | 'orca-ide' | 'orca-dev' {
+function resolveCompatibilityCliCommand(): 'orca' | 'orca-ide' | 'orca-dev' | 'orca-wake' {
   const configured = process.env.ORCA_CLI_COMMAND
-  if (configured === 'orca' || configured === 'orca-ide' || configured === 'orca-dev') {
+  if (
+    configured === 'orca' ||
+    configured === 'orca-ide' ||
+    configured === 'orca-dev' ||
+    configured === 'orca-wake'
+  ) {
     return configured
   }
   return process.platform === 'linux' ? 'orca-ide' : 'orca'

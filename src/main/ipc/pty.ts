@@ -1,5 +1,5 @@
 /* eslint-disable max-lines -- Why: PTY IPC is centralized in one main-process module so spawn env scoping, lifecycle cleanup, process inspection, and renderer IPC stay behind one audited boundary. */
-import { join, delimiter } from 'node:path'
+import { dirname, join, delimiter } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import {
@@ -1243,6 +1243,8 @@ export function buildPtyHostEnv(
   baseEnv: Record<string, string>,
   opts: BuildPtyHostEnvOptions
 ): Record<string, string> {
+  delete baseEnv.ORCA_PACKAGED_COMMAND_NAME
+  delete baseEnv.ORCA_PACKAGED_CLI_BIN_PATH
   mergePersistedWindowsPath(baseEnv)
   Object.assign(baseEnv, buildConfiguredProxyEnv(opts.networkProxySettings))
 
@@ -1400,7 +1402,20 @@ export function buildPtyHostEnv(
     if (!opts.isPackaged) {
       baseEnv.ORCA_USER_DATA_PATH ??= opts.userDataPath
     }
-    delete baseEnv.ORCA_CLI_COMMAND
+    if (
+      opts.isPackaged &&
+      process.env.ORCA_PACKAGED_COMMAND_NAME === 'orca-wake' &&
+      process.env.ORCA_PACKAGED_CLI_BIN_PATH
+    ) {
+      baseEnv.ORCA_CLI_COMMAND = 'orca-wake'
+      const cliBin = dirname(process.env.ORCA_PACKAGED_CLI_BIN_PATH)
+      const inheritedEntries = readInheritedPath(baseEnv)
+        .split(delimiter)
+        .filter((entry) => entry.length > 0 && entry !== cliBin)
+      baseEnv.PATH = [cliBin, ...inheritedEntries].join(delimiter)
+    } else {
+      delete baseEnv.ORCA_CLI_COMMAND
+    }
   }
   // Why: dev mode needs the launcher PATH override so `orca` resolves to the dev build instead of the production binary at /usr/local/bin/orca.
   if (!opts.isPackaged) {

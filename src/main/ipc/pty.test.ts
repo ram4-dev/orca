@@ -9440,6 +9440,45 @@ describe('registerPtyHandlers', () => {
     )
   })
 
+  it('exposes the matching bundled Wake Dev CLI only to local packaged terminals', async () => {
+    const savedCommand = process.env.ORCA_PACKAGED_COMMAND_NAME
+    const savedBin = process.env.ORCA_PACKAGED_CLI_BIN_PATH
+    process.env.ORCA_PACKAGED_COMMAND_NAME = 'orca-wake'
+    process.env.ORCA_PACKAGED_CLI_BIN_PATH =
+      '/Applications/Orca Wake Dev.app/Contents/Resources/bin/orca-wake'
+    try {
+      const runtime = {
+        setPtyController: vi.fn(),
+        preAllocateHandleForPty: vi.fn(() => 'term_wake'),
+        onPtySpawned: vi.fn(),
+        onPtyExit: vi.fn(),
+        onPtyData: vi.fn()
+      }
+      registerPtyHandlers(mainWindow as never, runtime as never)
+
+      await handlers.get('pty:spawn')!(null, { cols: 80, rows: 24 })
+
+      const env = spawnMock.mock.calls.at(-1)![2].env as Record<string, string>
+      expect(env.ORCA_CLI_COMMAND).toBe('orca-wake')
+      expect(env.ORCA_PACKAGED_COMMAND_NAME).toBeUndefined()
+      expect(env.ORCA_PACKAGED_CLI_BIN_PATH).toBeUndefined()
+      expect(env.PATH?.split(delimiter)[0]).toBe(
+        '/Applications/Orca Wake Dev.app/Contents/Resources/bin'
+      )
+    } finally {
+      if (savedCommand === undefined) {
+        delete process.env.ORCA_PACKAGED_COMMAND_NAME
+      } else {
+        process.env.ORCA_PACKAGED_COMMAND_NAME = savedCommand
+      }
+      if (savedBin === undefined) {
+        delete process.env.ORCA_PACKAGED_CLI_BIN_PATH
+      } else {
+        process.env.ORCA_PACKAGED_CLI_BIN_PATH = savedBin
+      }
+    }
+  })
+
   it('forces managed ORCA_USER_DATA_PATH for WSL spawns even when the caller provides a stale root', async () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')
     Object.defineProperty(process, 'platform', {

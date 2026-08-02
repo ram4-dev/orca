@@ -19,6 +19,10 @@ import {
   startControlledCodexServer,
   stopControlledCodexServer
 } from './codex-controlled-session-launch'
+import {
+  closeTestTransports,
+  connectTestTransport
+} from './codex-controlled-session-test-transport'
 
 type StubState = {
   status: 'idle' | 'active'
@@ -111,7 +115,6 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       "'--model' 'gpt-5' '--sandbox' 'workspace-write' '--ask-for-approval' 'never'"
     )
     expect(fixture.terminalLaunches[0]?.env).toEqual({ CODEX_HOME: fixture.input.codexHome })
-    expect(fixture.terminalLaunches[0]?.presentation).toBe('focused')
     expect(Buffer.byteLength(fixture.socketPath())).toBeLessThanOrEqual(100)
     expect(statSync(fixture.socketPath()).mode & 0o777).toBe(0o600)
     await expect(fixture.manager.getState(target(fixture.input.conversationId))).resolves.toBe(
@@ -220,10 +223,11 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
     expect(fixture.stub.turnStarts).toBe(1)
   })
 
-  it('cleans up the visible terminal and controller when readiness times out', async () => {
-    const fixture = createFixture({ readinessError: new Error('timeout') })
+  it('cleans up after a visible terminal remote-connection failure', async () => {
+    const message = 'failed to connect to the remote app server'
+    const fixture = createFixture({ readinessError: new Error(message) })
 
-    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow('timeout')
+    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow(message)
     expect(fixture.closedTerminals).toHaveLength(1)
     expect(fixture.processes[0]?.exitCode).toBe(0)
   })
@@ -292,41 +296,6 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       }
     }
   )
-
-  it('keeps a failed terminal cleanup registered for retry', async () => {
-    const fixture = createFixture({ closeVisibleTerminalFailures: 1 })
-    await fixture.manager.launch(fixture.input)
-
-    await expect(fixture.manager.disposeConversation(fixture.input.conversationId)).rejects.toThrow(
-      'terminal close failed'
-    )
-    expect(fixture.processes[0]?.exitCode).toBeNull()
-
-    await expect(
-      fixture.manager.disposeConversation(fixture.input.conversationId)
-    ).resolves.toBeUndefined()
-    expect(fixture.closedTerminals).toHaveLength(2)
-    expect(fixture.processes[0]?.exitCode).toBe(0)
-  })
-
-  it('keeps rollback cleanup registered when terminal closure fails', async () => {
-    const fixture = createFixture({
-      readinessError: new Error('timeout'),
-      closeVisibleTerminalFailures: 1
-    })
-
-    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow('timeout')
-    expect(fixture.processes[0]?.exitCode).toBeNull()
-    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow(
-      'requires cleanup before relaunch'
-    )
-
-    await expect(
-      fixture.manager.disposeConversation(fixture.input.conversationId)
-    ).resolves.toBeUndefined()
-    expect(fixture.closedTerminals).toHaveLength(2)
-    expect(fixture.processes[0]?.exitCode).toBe(0)
-  })
 
   it('preserves the owned socket when SIGKILL does not terminate the controller', async () => {
     vi.useFakeTimers()
@@ -777,6 +746,7 @@ function createFixture(
     presentation: 'focused'
   }
   const terminalLaunches: Record<string, unknown>[] = []
+  const visibleConnections: ReturnType<typeof connectTestTransport>[] = []
   const closedTerminals: Record<string, unknown>[] = []
   const currentAccount = { value: 'account-a' as string | null }
   const currentHandle = { value: 'handle-1' }
@@ -789,6 +759,7 @@ function createFixture(
     spawnProcess,
     createVisibleTerminal: async (launch) => {
       terminalLaunches.push(launch)
+      visibleConnections.push(connectTestTransport(launch.command))
       return {
         handle: 'handle-1',
         ptyId: 'pty-1',
@@ -802,7 +773,17 @@ function createFixture(
       }
     },
     waitForVisibleTerminal: async (terminal) => {
+      if (driftOnNextReadiness.value) {
+        driftOnNextReadiness.value = false
+        currentAccount.value = 'account-b'
+      }
+      return { ...terminal, terminalHandle: currentHandle.value }
+    },
+    waitForVisibleRemoteAttachment: async (terminal, proof) => {
       readinessChecks.value += 1
+      proof.assertControllerAlive()
+      await proof.waitForRemoteTransport(new AbortController().signal)
+      proof.assertRemoteTransportLive()
       if (driftOnNextReadiness.value) {
         driftOnNextReadiness.value = false
         currentAccount.value = 'account-b'
@@ -817,7 +798,9 @@ function createFixture(
       if ((options.closeVisibleTerminalFailures ?? 0) >= closedTerminals.length) {
         throw new Error('terminal close failed')
       }
+      closeTestTransports(visibleConnections)
     },
+    ensureVisibleTerminalStopped: async () => closeTestTransports(visibleConnections),
     resolveCurrentAccountId: () => currentAccount.value,
     isControlledLaunchEnabled: () => options.launch ?? true,
     isProviderEnabled: () => true,

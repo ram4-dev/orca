@@ -215,6 +215,7 @@ import { createCodexSessionMigrationScheduler } from './codex/codex-session-migr
 import { prepareLegacySharedCodexSessionResume } from './codex/codex-legacy-session-resume'
 import { CodexControlledSessionManager } from './codex/codex-controlled-session-manager'
 import { resolveControlledCodexLaunchAuthority } from './codex/codex-controlled-launch-authority'
+import { waitForControlledTerminalReadiness } from './codex/codex-controlled-terminal-readiness'
 import { resolveHostCodexSessionSourceHome } from './codex/codex-session-source-home'
 import type { CodexSessionResumePreparation } from './codex/codex-session-resume-home'
 import { prepareCodexSessionResume } from './codex/codex-session-resume-preparation'
@@ -2311,7 +2312,7 @@ void app.whenReady().then(async () => {
         cwd: launch.cwd,
         env: launch.env,
         title: 'Codex',
-        presentation: launch.presentation ?? 'focused',
+        presentation: 'focused',
         launchAgent: 'codex',
         resumeProviderSession: { key: 'session_id', id: launch.threadId }
       }),
@@ -2323,23 +2324,54 @@ void app.whenReady().then(async () => {
       if (current.ptyId !== terminal.terminalPtyId) {
         throw new Error('controlled Codex terminal PTY identity changed')
       }
-      const ready = await runtimeService.waitForTerminal(current.handle, {
-        condition: 'tui-idle',
-        timeoutMs: 15_000
-      })
-      if (!ready.satisfied || ready.status !== 'running' || ready.blockedReason) {
-        throw new Error('controlled Codex visible terminal did not become ready')
+      const read = await runtimeService.readTerminal(current.handle, { limit: 1 })
+      if (read.status !== 'running') {
+        throw new Error('controlled Codex visible terminal is not running')
       }
-      const refreshed = runtimeService.resolveTerminalPane(
-        terminal.terminalPaneKey,
-        terminal.worktreeId
-      )
-      return {
-        ...terminal,
-        terminalHandle: refreshed.handle,
-        terminalPtyId: refreshed.ptyId
-      }
+      return { ...terminal, terminalHandle: current.handle, terminalPtyId: current.ptyId }
     },
+    waitForVisibleRemoteAttachment: async (terminal, proof) =>
+      waitForControlledTerminalReadiness({
+        timeoutMs: 15_000,
+        waitForRemoteTransport: proof.waitForRemoteTransport,
+        assertRemoteTransportLive: proof.assertRemoteTransportLive,
+        waitForIdle: async (signal) => {
+          const current = runtimeService.resolveTerminalPane(
+            terminal.terminalPaneKey,
+            terminal.worktreeId
+          )
+          const ready = await runtimeService.waitForTerminal(current.handle, {
+            condition: 'tui-idle',
+            timeoutMs: 15_000,
+            signal
+          })
+          if (!ready.satisfied || ready.status !== 'running' || ready.blockedReason) {
+            throw new Error('controlled Codex visible terminal did not become ready')
+          }
+        },
+        observe: async () => {
+          proof.assertControllerAlive()
+          const current = runtimeService.resolveTerminalPane(
+            terminal.terminalPaneKey,
+            terminal.worktreeId
+          )
+          if (current.ptyId !== terminal.terminalPtyId) {
+            throw new Error('controlled Codex terminal PTY identity changed')
+          }
+          const read = await runtimeService.readTerminal(current.handle, { limit: 1_000 })
+          proof.assertControllerAlive()
+          return {
+            status: read.status,
+            output: read.tail.join('\n'),
+            outputComplete: !read.truncated && read.limited !== true,
+            value: {
+              ...terminal,
+              terminalHandle: current.handle,
+              terminalPtyId: current.ptyId
+            }
+          }
+        }
+      }),
     closeVisibleTerminal: async (terminal) => {
       let terminalHandle = terminal.terminalHandle
       try {
@@ -2351,9 +2383,31 @@ void app.whenReady().then(async () => {
         // The original handle remains the only cleanup target before pane registration completes.
       }
       const closed = await runtimeService.closeTerminal(terminalHandle)
-      if (!closed.ptyKilled) {
-        throw new Error('controlled Codex terminal did not stop')
+      if (closed.ptyKilled) {
+        return
       }
+      try {
+        const read = await runtimeService.readTerminal(terminalHandle, { limit: 1 })
+        if (read.status === 'running') {
+          throw new Error('controlled Codex terminal did not stop')
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === 'controlled Codex terminal did not stop') {
+          throw error
+        }
+        if (
+          !(error instanceof Error) ||
+          !/^(?:terminal_handle_stale|terminal_not_found)$/.test(error.message)
+        ) {
+          throw error
+        }
+      }
+    },
+    ensureVisibleTerminalStopped: async (terminal) => {
+      if (!terminal.terminalPtyId) {
+        throw new Error('controlled Codex terminal lacks an exact PTY identity')
+      }
+      await runtimeService.ensureTerminalPtyStopped(terminal.terminalPtyId)
     },
     resolveCurrentAccountId: () => normalizeCodexRuntimeSelection(store!.getSettings()).host,
     // Why: monotonic selection writes detect A-to-B-to-A changes when rollback restores prior state.

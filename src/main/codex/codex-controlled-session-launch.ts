@@ -7,7 +7,8 @@ import { quotePosixShell } from '../../shared/wsl-login-shell-command'
 export {
   getControlledSocketPath,
   getControlledSocketRoot,
-  getControlledStatePath
+  getControlledStatePath,
+  getControlledVisibleSocketPath
 } from './codex-controlled-socket-paths'
 
 const SOCKET_READY_TIMEOUT_MS = 10_000

@@ -80,6 +80,24 @@ describe('CodexControlledSessionManager race fences', () => {
     await expect(fixture.manager.getState(target())).resolves.toBe('unknown')
   })
 
+  it('reports a disconnected visible transport as missing before refresh', async () => {
+    const fixture = createFixture()
+    fixture.transport.live = false
+
+    await expect(fixture.manager.getState(target())).resolves.toBe('missing')
+    expect(fixture.refreshCalls).not.toHaveBeenCalled()
+  })
+
+  it('fences turn submission after the visible transport disconnects', async () => {
+    const fixture = createFixture()
+    fixture.transport.live = false
+
+    await expect(fixture.manager.prepareAndFinalizeTurn(acceptedTurnRequest())).rejects.toThrow(
+      'controlled Codex wake is disabled'
+    )
+    expect(fixture.request).not.toHaveBeenCalled()
+  })
+
   it('emits terminal only for a completed turn from the current session', () => {
     const fixture = createFixture()
     const listener = vi.fn()
@@ -154,6 +172,7 @@ function createFixture() {
   const account = { value: 'account-a' as string | null }
   const accountSelection = { value: {} as object }
   const accountRevision = { value: 0 }
+  const transport = { live: true }
   const read = {
     blocker: null as Deferred | null,
     error: null as Error | null,
@@ -185,7 +204,9 @@ function createFixture() {
     stateRoot: '/unused',
     createVisibleTerminal: async () => ({ handle: 'unused' }),
     waitForVisibleTerminal: refreshCalls,
+    waitForVisibleRemoteAttachment: refreshCalls,
     closeVisibleTerminal: async () => undefined,
+    ensureVisibleTerminalStopped: async () => undefined,
     resolveCurrentAccountId: () => account.value,
     resolveCurrentAccountRevision: () => accountRevision.value,
     isControlledLaunchEnabled: () => true,
@@ -193,7 +214,7 @@ function createFixture() {
     isWakeEnabled: () => true,
     isKillSwitchOpen: () => true
   })
-  const session = createSession(request)
+  const session = createSession(request, transport)
   getSessionMap(manager).set('conversation-1', session)
   return {
     account,
@@ -204,6 +225,7 @@ function createFixture() {
     refreshCalls,
     request,
     session,
+    transport,
     blockRead: () => (read.blocker = createDeferred()),
     blockRefresh: () => (refreshBlocker = createDeferred()),
     replaceSession: () => {
@@ -220,7 +242,10 @@ function createFixture() {
   }
 }
 
-function createSession(request: ReturnType<typeof vi.fn>): ControlledCodexSession {
+function createSession(
+  request: ReturnType<typeof vi.fn>,
+  transport: { live: boolean }
+): ControlledCodexSession {
   const launch: CodexControlledSessionLaunch = {
     conversationId: 'conversation-1',
     threadId: 'thread-1',
@@ -244,8 +269,20 @@ function createSession(request: ReturnType<typeof vi.fn>): ControlledCodexSessio
       worktreeId: 'worktree-1'
     },
     client: { request } as unknown as ControlledCodexSession['client'],
+    visibleTransport: {
+      socketPath: '/unused-visible.sock',
+      isLive: () => transport.live,
+      assertLive: () => {
+        if (!transport.live) {
+          throw new Error('controlled Codex visible remote transport is disconnected')
+        }
+      },
+      waitForLive: async () => undefined,
+      onDisconnect: () => undefined,
+      stop: async () => undefined
+    },
     missing: false
-  } as ControlledCodexSession
+  } as unknown as ControlledCodexSession
 }
 
 function createDeferred(): Deferred {

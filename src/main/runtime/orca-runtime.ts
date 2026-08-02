@@ -659,9 +659,14 @@ import {
   resolveLocalProjectRuntimeForRepo,
   resolveLocalProjectRuntimesForRepos
 } from '../project-runtime-git-options'
+import { ensureControlledTerminalPtyStopped } from '../codex/codex-controlled-terminal-pty-stop'
 import { resolveLocalProjectRuntimeForWorktreeId } from '../local-project-runtime-resolution'
 import type { ProjectExecutionRuntimeResolution } from '../../shared/project-execution-runtime'
-import { resolveTerminalOrchestrationCliCommand } from './orchestration/cli-command'
+import {
+  resolveLocalOrchestrationCliCommand,
+  resolveTerminalOrchestrationCliCommand,
+  resolveUnidentifiedTerminalOrchestrationCliCommand
+} from './orchestration/cli-command'
 import {
   getLocalWorktreePathAccess,
   removeLocalWorktreePath,
@@ -11962,24 +11967,32 @@ export class OrcaRuntimeService {
       : undefined
   }
 
-  getTerminalOrchestrationCliCommand(handle: string): 'orca' | 'orca-ide' {
+  getTerminalOrchestrationCliCommand(handle: string): string {
     let pty: RuntimePtyWorktreeRecord | null = null
     try {
       const ptyId = this.resolveLeafForHandle(handle)?.ptyId
       pty = ptyId ? (this.ptysById.get(ptyId) ?? null) : null
     } catch {
-      return 'orca'
+      return resolveUnidentifiedTerminalOrchestrationCliCommand()
     }
     if (!pty) {
-      return 'orca'
+      return resolveUnidentifiedTerminalOrchestrationCliCommand()
     }
-    return resolveTerminalOrchestrationCliCommand({
+    const placement = {
       connectionId: pty.connectionId,
       isWsl: pty.isWsl,
       worktreeId: pty.worktreeId,
       projectRuntime: this.store
         ? resolveLocalProjectRuntimeForWorktreeId(this.requireStore(), pty.worktreeId)
         : undefined
+    }
+    const hostCommand = resolveTerminalOrchestrationCliCommand(placement)
+    if (pty.connectionId || hostCommand === 'orca-ide') {
+      return hostCommand
+    }
+    return resolveTerminalOrchestrationCliCommand({
+      ...placement,
+      localCommand: resolveLocalOrchestrationCliCommand()
     })
   }
 
@@ -26070,6 +26083,10 @@ export class OrcaRuntimeService {
       this.notifier?.closeTerminal(leaf.tabId, leaf.paneRuntimeId)
     }
     return { handle, tabId: leaf.tabId, ptyKilled }
+  }
+
+  async ensureTerminalPtyStopped(ptyId: string): Promise<void> {
+    await ensureControlledTerminalPtyStopped(this.ptyController, ptyId)
   }
 
   async closeTerminalTab(handle: string): Promise<RuntimeTerminalClose> {
