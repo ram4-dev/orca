@@ -1826,6 +1826,14 @@ describe('useIpcEvents updater integration', () => {
       message: 'The workspace is not connected to a remote Orca host.'
     })
     const focusRuntimeTerminalSurface = vi.fn(() => false)
+    const waitForPublishedRuntimeTerminalIdentity = vi.fn(
+      async (worktreeId: string, tabId: string) => ({
+        worktreeId,
+        tabId,
+        leafId: '11111111-1111-4111-8111-111111111111',
+        ptyId: 'pty-created'
+      })
+    )
     const focusTerminalTabSurface = vi.fn()
     let floatingPanelFocused = false
     const storeState = {
@@ -1947,8 +1955,13 @@ describe('useIpcEvents updater integration', () => {
             activate?: boolean
             presentation?: 'background' | 'focused'
             source?: 'runtime-session'
+            tabId?: string
+            requireRegisteredIdentity?: true
           }) => void)
         | null
+    } = { current: null }
+    const settleTerminalCreateListenerRef: {
+      current: ((data: { requestId: string; accepted: boolean }) => void) | null
     } = { current: null }
     const focusTerminalListenerRef: {
       current:
@@ -2022,7 +2035,8 @@ describe('useIpcEvents updater integration', () => {
       focusTerminalTabSurface
     }))
     vi.doMock('@/runtime/sync-runtime-graph', () => ({
-      focusRuntimeTerminalSurface
+      focusRuntimeTerminalSurface,
+      waitForPublishedRuntimeTerminalIdentity
     }))
     vi.doMock('@/lib/activate-tab-and-focus-pane', () => ({
       activateTabAndFocusPane: vi.fn()
@@ -2096,9 +2110,17 @@ describe('useIpcEvents updater integration', () => {
               title?: string
               activate?: boolean
               presentation?: 'background' | 'focused'
+              tabId?: string
+              requireRegisteredIdentity?: true
             }) => void
           ) => {
             requestTerminalCreateListenerRef.current = listener
+            return () => {}
+          },
+          onSettleTerminalCreate: (
+            listener: (data: { requestId: string; accepted: boolean }) => void
+          ) => {
+            settleTerminalCreateListenerRef.current = listener
             return () => {}
           },
           onRequestTerminalTabMount: () => () => {},
@@ -2447,6 +2469,113 @@ describe('useIpcEvents updater integration', () => {
       requestId: 'req-renderer-backed',
       tabId: 'tab-new',
       title: 'Codex'
+    })
+
+    createTab.mockClear()
+    replyTerminalCreate.mockClear()
+    requestTerminalCreateListenerRef.current({
+      requestId: 'req-registered-renderer-backed',
+      worktreeId: 'wt-2',
+      tabId: 'tab-controlled',
+      requireRegisteredIdentity: true,
+      title: 'Controlled Codex',
+      command: 'codex',
+      activate: false
+    })
+
+    expect(createTab).toHaveBeenCalledWith('wt-2', undefined, undefined, {
+      id: 'tab-controlled',
+      activate: false,
+      recordInteraction: false
+    })
+    expect(waitForPublishedRuntimeTerminalIdentity).toHaveBeenCalledWith('wt-2', 'tab-controlled')
+    expect(replyTerminalCreate).not.toHaveBeenCalled()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-registered-renderer-backed',
+      tabId: 'tab-controlled',
+      title: 'Controlled Codex',
+      identity: {
+        worktreeId: 'wt-2',
+        tabId: 'tab-controlled',
+        leafId: '11111111-1111-4111-8111-111111111111',
+        ptyId: 'pty-created'
+      }
+    })
+    settleTerminalCreateListenerRef.current?.({
+      requestId: 'req-registered-renderer-backed',
+      accepted: true
+    })
+
+    closeTerminalTabMock.mockClear()
+    replyTerminalCreate.mockClear()
+    let resolveLateIdentity: (identity: {
+      worktreeId: string
+      tabId: string
+      leafId: string
+      ptyId: string
+    }) => void = () => {}
+    waitForPublishedRuntimeTerminalIdentity.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLateIdentity = resolve
+        })
+    )
+    requestTerminalCreateListenerRef.current({
+      requestId: 'req-registered-renderer-late',
+      worktreeId: 'wt-2',
+      tabId: 'tab-late',
+      requireRegisteredIdentity: true,
+      title: 'Late Codex',
+      command: 'codex',
+      activate: false
+    })
+    settleTerminalCreateListenerRef.current?.({
+      requestId: 'req-registered-renderer-late',
+      accepted: false
+    })
+    expect(closeTerminalTabMock).toHaveBeenCalledWith('tab-late', {
+      force: true,
+      reason: 'cleanup',
+      captureRecentlyClosed: false
+    })
+    resolveLateIdentity({
+      worktreeId: 'wt-2',
+      tabId: 'tab-late',
+      leafId: '22222222-2222-4222-8222-222222222222',
+      ptyId: 'pty-late'
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(replyTerminalCreate).not.toHaveBeenCalled()
+
+    closeTerminalTabMock.mockClear()
+    replyTerminalCreate.mockClear()
+    waitForPublishedRuntimeTerminalIdentity.mockRejectedValueOnce(
+      new Error('Timed out waiting for renderer terminal identity')
+    )
+    requestTerminalCreateListenerRef.current({
+      requestId: 'req-registered-renderer-failure',
+      worktreeId: 'wt-2',
+      tabId: 'tab-failed',
+      requireRegisteredIdentity: true,
+      title: 'Failed Codex',
+      command: 'codex',
+      activate: false
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(closeTerminalTabMock).toHaveBeenCalledWith('tab-failed', {
+      force: true,
+      reason: 'cleanup',
+      captureRecentlyClosed: false
+    })
+    expect(closeTerminalTabMock).not.toHaveBeenCalledWith('tab-controlled', expect.anything())
+    expect(replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-registered-renderer-failure',
+      tabId: 'tab-failed',
+      error: 'Timed out waiting for renderer terminal identity'
     })
 
     createTab.mockClear()
