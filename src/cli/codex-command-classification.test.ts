@@ -16,6 +16,28 @@ describe('shouldUseRendererBackedCodexTerminal', () => {
     expect(shouldUseRendererBackedCodexTerminal('codex -c active=cloud cloud')).toBe(true)
     expect(shouldUseRendererBackedCodexTerminal('codex.cmd resume --last')).toBe(true)
     expect(shouldUseRendererBackedCodexTerminal('env OPENAI_API_KEY=stub codex')).toBe(true)
+    expect(
+      shouldUseRendererBackedCodexTerminal(
+        'env CODEX_HOME=/tmp/codex codex resume --remote unix:///tmp/codex.sock thread-1'
+      )
+    ).toBe(true)
+    expect(
+      shouldUseRendererBackedCodexTerminal(
+        "'env' 'CODEX_HOME=/tmp/codex' 'codex' 'resume' '--remote' 'unix:///tmp/codex.sock' 'thread-1'"
+      )
+    ).toBe(true)
+    expect(shouldUseRendererBackedCodexTerminal('env -C /tmp codex')).toBe(true)
+    expect(shouldUseRendererBackedCodexTerminal('env -P /usr/bin codex resume --last')).toBe(true)
+    expect(shouldUseRendererBackedCodexTerminal('env -S "codex resume --last"')).toBe(true)
+    expect(shouldUseRendererBackedCodexTerminal('env --chdir /tmp codex')).toBe(true)
+    expect(shouldUseRendererBackedCodexTerminal('env --chdir=/tmp codex')).toBe(true)
+    expect(shouldUseRendererBackedCodexTerminal('env --unset DEBUG codex')).toBe(true)
+    expect(shouldUseRendererBackedCodexTerminal('env --split-string "codex resume --last"')).toBe(
+      true
+    )
+    expect(shouldUseRendererBackedCodexTerminal('env --split-string="codex resume --last"')).toBe(
+      true
+    )
   })
 
   it('keeps one-shot Codex commands on the background path', () => {
@@ -42,6 +64,12 @@ describe('shouldUseRendererBackedCodexTerminal', () => {
     expect(shouldUseRendererBackedCodexTerminal(undefined)).toBe(false)
     expect(shouldUseRendererBackedCodexTerminal('claude')).toBe(false)
     expect(shouldUseRendererBackedCodexTerminal('npm exec codex')).toBe(false)
+    expect(shouldUseRendererBackedCodexTerminal('env -C codex bash')).toBe(false)
+    expect(shouldUseRendererBackedCodexTerminal('env -P codex bash')).toBe(false)
+    expect(shouldUseRendererBackedCodexTerminal('env -S "bash" codex')).toBe(false)
+    expect(shouldUseRendererBackedCodexTerminal('env --chdir codex bash')).toBe(false)
+    expect(shouldUseRendererBackedCodexTerminal('env --unknown codex')).toBe(false)
+    expect(shouldUseRendererBackedCodexTerminal('env -S "codex $ARGS"')).toBe(false)
   })
 })
 

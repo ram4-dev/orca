@@ -8,6 +8,19 @@ export type ControlledTerminalObservation<T> = {
   value: T
 }
 
+export function assertControlledTerminalIdleResult(result: {
+  satisfied: boolean
+  status: 'running' | 'exited' | 'unknown'
+  blockedReason?: string
+}): void {
+  if (result.blockedReason) {
+    throw new Error(`controlled Codex visible terminal is blocked: ${result.blockedReason}`)
+  }
+  if (!result.satisfied || result.status !== 'running') {
+    throw new Error('controlled Codex visible terminal did not become ready')
+  }
+}
+
 export async function waitForControlledTerminalReadiness<T>(args: {
   waitForIdle: (signal: AbortSignal) => Promise<void>
   waitForRemoteTransport: (signal: AbortSignal) => Promise<void>

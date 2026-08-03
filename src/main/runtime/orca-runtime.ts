@@ -16092,7 +16092,8 @@ export class OrcaRuntimeService {
     const ptyId = this.getTerminalAgentStatusPtyId(handle)
     const terminal = this.getTerminalAgentStatusSnapshot(handle, ptyId)
     const explicitStatus = this.getFreshExplicitAgentStatusForHandle(handle)
-    const blockedByWaitText = detectTerminalWaitBlockedReason(terminal.waitText)
+    const allowCodexComposer = this.ptyAllowsCodexComposerReadiness(ptyId)
+    const blockedByWaitText = detectTerminalWaitBlockedReason(terminal.waitText, allowCodexComposer)
     const liveTitleClearsBlockedText =
       terminal.titleStatusIsLive &&
       terminal.titleStatus !== null &&
@@ -16570,7 +16571,8 @@ export class OrcaRuntimeService {
         pty.pty.tailPartialLine,
         pty.pty.preview
       )
-      const ptyBlockedReason = detectTerminalWaitBlockedReason(ptyWaitText)
+      const allowCodexComposer = pty.pty.launchAgent === 'codex'
+      const ptyBlockedReason = detectTerminalWaitBlockedReason(ptyWaitText, allowCodexComposer)
       if (condition === 'tui-idle' && ptyBlockedReason) {
         return buildPtyTerminalWaitBlockedResult(handle, condition, pty.pty, ptyBlockedReason)
       }
@@ -16580,7 +16582,7 @@ export class OrcaRuntimeService {
       if (
         condition === 'tui-idle' &&
         (this.getAdoptedPtyExplicitIdleStatus(pty.pty) === 'idle' ||
-          isKnownReadyPromptPreview(ptyWaitText))
+          isKnownReadyPromptPreview(ptyWaitText, allowCodexComposer))
       ) {
         return buildPtyTerminalWaitResult(handle, condition, pty.pty)
       }
@@ -16628,7 +16630,11 @@ export class OrcaRuntimeService {
             live.pty.tailPartialLine,
             live.pty.preview
           )
-          const blockedReason = detectTerminalWaitBlockedReason(livePtyWaitText)
+          const liveAllowsCodexComposer = live.pty.launchAgent === 'codex'
+          const blockedReason = detectTerminalWaitBlockedReason(
+            livePtyWaitText,
+            liveAllowsCodexComposer
+          )
           if (blockedReason) {
             this.resolveWaiter(
               waiter,
@@ -16638,7 +16644,7 @@ export class OrcaRuntimeService {
             this.resolveWaiter(waiter, buildPtyTerminalWaitResult(handle, condition, live.pty))
           } else if (
             this.getAdoptedPtyExplicitIdleStatus(live.pty) === 'idle' ||
-            isKnownReadyPromptPreview(livePtyWaitText)
+            isKnownReadyPromptPreview(livePtyWaitText, liveAllowsCodexComposer)
           ) {
             this.resolveWaiter(waiter, buildPtyTerminalWaitResult(handle, condition, live.pty))
           } else {
@@ -16654,7 +16660,8 @@ export class OrcaRuntimeService {
     }
 
     const leafWaitText = buildTerminalWaitText(leaf.tailBuffer, leaf.tailPartialLine, leaf.preview)
-    const leafBlockedReason = detectTerminalWaitBlockedReason(leafWaitText)
+    const allowCodexComposer = this.leafAllowsCodexComposerReadiness(leaf)
+    const leafBlockedReason = detectTerminalWaitBlockedReason(leafWaitText, allowCodexComposer)
     if (condition === 'tui-idle' && leafBlockedReason) {
       return buildTerminalWaitBlockedResult(handle, condition, leaf, leafBlockedReason)
     }
@@ -16671,7 +16678,7 @@ export class OrcaRuntimeService {
       const fastPathTitle = leaf.paneTitle ?? this.tabs.get(leaf.tabId)?.title
       if (
         (fastPathTitle && detectExplicitIdleStatusFromTitle(fastPathTitle) === 'idle') ||
-        isKnownReadyPromptPreview(leafWaitText)
+        isKnownReadyPromptPreview(leafWaitText, allowCodexComposer)
       ) {
         return buildTerminalWaitResult(handle, condition, leaf)
       }
@@ -16730,7 +16737,11 @@ export class OrcaRuntimeService {
             live.leaf.tailPartialLine,
             live.leaf.preview
           )
-          const blockedReason = detectTerminalWaitBlockedReason(liveLeafWaitText)
+          const liveAllowsCodexComposer = this.leafAllowsCodexComposerReadiness(live.leaf)
+          const blockedReason = detectTerminalWaitBlockedReason(
+            liveLeafWaitText,
+            liveAllowsCodexComposer
+          )
           if (blockedReason) {
             this.resolveWaiter(
               waiter,
@@ -16749,7 +16760,7 @@ export class OrcaRuntimeService {
             const fastPathTitle = live.leaf.paneTitle ?? this.tabs.get(live.leaf.tabId)?.title
             if (
               (fastPathTitle && detectExplicitIdleStatusFromTitle(fastPathTitle) === 'idle') ||
-              isKnownReadyPromptPreview(liveLeafWaitText)
+              isKnownReadyPromptPreview(liveLeafWaitText, liveAllowsCodexComposer)
             ) {
               this.resolveWaiter(waiter, buildTerminalWaitResult(handle, condition, live.leaf))
             } else {
@@ -29991,7 +30002,7 @@ export class OrcaRuntimeService {
         return true
       }
       const waitText = buildTerminalWaitText(leaf.tailBuffer, leaf.tailPartialLine, leaf.preview)
-      if (isKnownReadyPromptPreview(waitText)) {
+      if (isKnownReadyPromptPreview(waitText, this.leafAllowsCodexComposerReadiness(leaf))) {
         return true
       }
       const hasCurrentTitleEvidence = paneTitle !== null || tabTitle !== null
@@ -30047,7 +30058,7 @@ export class OrcaRuntimeService {
       updatedAt: pty.managementTitleAt
     })
     const waitText = buildTerminalWaitText(pty.tailBuffer, pty.tailPartialLine, pty.preview)
-    if (isKnownReadyPromptPreview(waitText)) {
+    if (isKnownReadyPromptPreview(waitText, pty.launchAgent === 'codex')) {
       return true
     }
     // Why: stale status is a fallback only when no current title evidence exists; neutral titles (shells) clear it.
@@ -30598,7 +30609,8 @@ export class OrcaRuntimeService {
           leaf.tailPartialLine,
           leaf.preview
         )
-        const blockedReason = detectTerminalWaitBlockedReason(leafWaitText)
+        const allowCodexComposer = this.leafAllowsCodexComposerReadiness(leaf)
+        const blockedReason = detectTerminalWaitBlockedReason(leafWaitText, allowCodexComposer)
         if (blockedReason) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
@@ -30610,7 +30622,7 @@ export class OrcaRuntimeService {
           )
           return
         }
-        if (isKnownReadyPromptPreview(leafWaitText)) {
+        if (isKnownReadyPromptPreview(leafWaitText, allowCodexComposer)) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
             waiter.pollInterval = null
@@ -30666,7 +30678,8 @@ export class OrcaRuntimeService {
           return
         }
         const ptyWaitText = buildTerminalWaitText(pty.tailBuffer, pty.tailPartialLine, pty.preview)
-        const blockedReason = detectTerminalWaitBlockedReason(ptyWaitText)
+        const allowCodexComposer = pty.launchAgent === 'codex'
+        const blockedReason = detectTerminalWaitBlockedReason(ptyWaitText, allowCodexComposer)
         if (blockedReason) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
@@ -30681,7 +30694,7 @@ export class OrcaRuntimeService {
         // Why: adopted background PTY handles use their live xterm title as the same readiness signal as leaf handles.
         if (
           this.getAdoptedPtyExplicitIdleStatus(pty) === 'idle' ||
-          isKnownReadyPromptPreview(ptyWaitText)
+          isKnownReadyPromptPreview(ptyWaitText, allowCodexComposer)
         ) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
@@ -30730,6 +30743,14 @@ export class OrcaRuntimeService {
       }
     }
     return null
+  }
+
+  private leafAllowsCodexComposerReadiness(leaf: RuntimeLeafRecord): boolean {
+    return leaf.ptyId !== null && this.ptyAllowsCodexComposerReadiness(leaf.ptyId)
+  }
+
+  private ptyAllowsCodexComposerReadiness(ptyId: string): boolean {
+    return this.ptysById.get(ptyId)?.launchAgent === 'codex'
   }
 
   // Why: push-on-idle delivery is event-driven (no polling) because the runtime owns both the message store and terminal status detection.
@@ -35241,9 +35262,9 @@ function detectExplicitIdleStatusFromTitle(title: string): AgentStatus | null {
   return null
 }
 
-function isKnownReadyPromptPreview(preview: string): boolean {
+function isKnownReadyPromptPreview(preview: string, allowCodexComposer = false): boolean {
   const normalized = preview.toLowerCase()
-  const readyIndex = findKnownReadyPromptIndex(normalized)
+  const readyIndex = findKnownReadyPromptIndex(normalized, allowCodexComposer)
   if (readyIndex === null) {
     return false
   }
@@ -35254,19 +35275,23 @@ function isKnownReadyPromptPreview(preview: string): boolean {
   return true
 }
 
-function detectTerminalWaitBlockedReason(preview: string): RuntimeTerminalWaitBlockedReason | null {
+function detectTerminalWaitBlockedReason(
+  preview: string,
+  allowCodexComposer = false
+): RuntimeTerminalWaitBlockedReason | null {
   const normalized = preview.toLowerCase()
-  return findActionableTerminalWaitBlockedSignal(normalized)?.reason ?? null
+  return findActionableTerminalWaitBlockedSignal(normalized, allowCodexComposer)?.reason ?? null
 }
 
 function findActionableTerminalWaitBlockedSignal(
-  normalized: string
+  normalized: string,
+  allowCodexComposer = false
 ): { reason: RuntimeTerminalWaitBlockedReason; index: number } | null {
   const blockedSignal = findTerminalWaitBlockedSignal(normalized)
   if (blockedSignal === null) {
     return null
   }
-  const dismissedModalIndex = findDismissedStartupModalIndex(normalized)
+  const dismissedModalIndex = findDismissedStartupModalIndex(normalized, allowCodexComposer)
   // Why: a live prompt after the modal means it was dismissed → signal no longer actionable, even mid-run (Cursor never reports idle via OSC title).
   return dismissedModalIndex !== null && dismissedModalIndex > blockedSignal.index
     ? null
@@ -35274,18 +35299,21 @@ function findActionableTerminalWaitBlockedSignal(
 }
 
 // Why: a live prompt (idle OR busy) proves the startup modal was dismissed, so a mid-run Cursor lane stops reporting stale trust hits.
-function findDismissedStartupModalIndex(normalized: string): number | null {
+function findDismissedStartupModalIndex(
+  normalized: string,
+  allowCodexComposer = false
+): number | null {
   const indexes = [
-    findCodexReadyPromptIndex(normalized),
+    findCodexReadyPromptIndex(normalized, allowCodexComposer),
     findAntigravityReadyPromptIndex(normalized),
     findCursorActivePromptIndex(normalized)
   ].filter((index): index is number => index !== null)
   return indexes.length > 0 ? Math.max(...indexes) : null
 }
 
-function findKnownReadyPromptIndex(normalized: string): number | null {
+function findKnownReadyPromptIndex(normalized: string, allowCodexComposer = false): number | null {
   const indexes = [
-    findCodexReadyPromptIndex(normalized),
+    findCodexReadyPromptIndex(normalized, allowCodexComposer),
     findAntigravityReadyPromptIndex(normalized),
     findCursorReadyPromptIndex(normalized)
   ].filter((index): index is number => index !== null)
@@ -35312,14 +35340,38 @@ function findCursorReadyPromptIndex(normalized: string): number | null {
   return CURSOR_BUSY_SPINNER_RE.test(normalized.slice(activeIndex)) ? null : activeIndex
 }
 
-function findCodexReadyPromptIndex(normalized: string): number | null {
+function findCodexReadyPromptIndex(normalized: string, allowCodexComposer = false): number | null {
+  const composerIndex = allowCodexComposer ? findCodexComposerReadyPromptIndex(normalized) : null
   const headerIndex = normalized.lastIndexOf('openai codex')
   if (headerIndex === -1) {
-    return null
+    return composerIndex
   }
   const readySegment = normalized.slice(headerIndex)
   // Why: Codex prints permissions only in YOLO mode; the stable ready header is OpenAI Codex + model + directory.
-  return readySegment.includes('model:') && readySegment.includes('directory:') ? headerIndex : null
+  const legacyIndex =
+    readySegment.includes('model:') && readySegment.includes('directory:') ? headerIndex : null
+  return composerIndex !== null && (legacyIndex === null || composerIndex > legacyIndex)
+    ? composerIndex
+    : legacyIndex
+}
+
+function findCodexComposerReadyPromptIndex(normalized: string): number | null {
+  // Why: Codex >=0.145 replaced the legacy header with a composer plus model/path footer.
+  const composerLine = /(?:^|\n)[ \t]*›[^\n]*/g
+  let readyIndex: number | null = null
+  for (const match of normalized.matchAll(composerLine)) {
+    const promptIndex = match.index + (match[0].startsWith('\n') ? 1 : 0)
+    const followingLines = normalized.slice(promptIndex).split('\n', 5)
+    if (followingLines.slice(1).some(isCodexComposerFooterLine)) {
+      readyIndex = promptIndex
+    }
+  }
+  return readyIndex
+}
+
+function isCodexComposerFooterLine(line: string): boolean {
+  const footer = /^\s*(\S(?:.*?\S)?)\s[·•]\s(.+)$/.exec(line)
+  return footer ? /(?:^|\s)(?:~[\\/]|[a-z]:[\\/]|\/)/i.test(footer[2]!) : false
 }
 
 function findAntigravityReadyPromptIndex(normalized: string): number | null {

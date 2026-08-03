@@ -98,11 +98,30 @@ describe('terminal create CLI', () => {
     expect(call).toHaveBeenCalledWith('terminal.create', {
       worktree: 'id:worktree-1',
       command: 'codex',
+      launchAgent: 'codex',
       title: undefined,
       focus: false,
       rendererBacked: true,
       activate: false
     })
+  })
+
+  it('marks an identifiable Codex remote resume for terminal readiness', async () => {
+    const command =
+      'env CODEX_HOME=/tmp/codex codex resume --remote unix:///tmp/codex.sock thread-1'
+    const { call, promise } = invoke(
+      new Map<string, string | boolean>([
+        ['worktree', 'id:worktree-1'],
+        ['command', command]
+      ])
+    )
+
+    await promise
+
+    expect(call).toHaveBeenCalledWith(
+      'terminal.create',
+      expect.objectContaining({ command, launchAgent: 'codex' })
+    )
   })
 
   it('routes explicit controlled coordinator creation through the agent-session RPC', async () => {

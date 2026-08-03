@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { waitForControlledTerminalReadiness } from './codex-controlled-terminal-readiness'
+import {
+  assertControlledTerminalIdleResult,
+  waitForControlledTerminalReadiness
+} from './codex-controlled-terminal-readiness'
 
 describe('waitForControlledTerminalReadiness', () => {
   const remoteTransport = {
@@ -115,5 +118,15 @@ describe('waitForControlledTerminalReadiness', () => {
         timeoutMs: 100
       })
     ).rejects.toThrow('visible remote transport is disconnected')
+  })
+
+  it('preserves the explicit runtime blocker in controlled launch failures', () => {
+    expect(() =>
+      assertControlledTerminalIdleResult({
+        satisfied: false,
+        status: 'running',
+        blockedReason: 'codex-cwd-prompt'
+      })
+    ).toThrow('controlled Codex visible terminal is blocked: codex-cwd-prompt')
   })
 })
