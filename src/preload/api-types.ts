@@ -366,6 +366,7 @@ import type {
   RuntimeSyncWindowGraphResult,
   RuntimeSyncWindowGraph,
   RuntimeTerminalCreateRequestPayload,
+  RuntimeTerminalCreateSettlementPayload,
   RuntimeTerminalDriverState,
   RuntimeTerminalPresentation
 } from '../shared/runtime-types'
@@ -3179,6 +3180,9 @@ export type PreloadApi = {
     ) => () => void
     onRequestTerminalCreate: (
       callback: (data: RuntimeTerminalCreateRequestPayload) => void
+    ) => () => void
+    onSettleTerminalCreate?: (
+      callback: (data: RuntimeTerminalCreateSettlementPayload) => void
     ) => () => void
     onRequestTerminalTabMount: (
       callback: (data: { worktreeId: string; tabId?: string; ptyId?: string }) => void

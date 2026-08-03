@@ -12809,26 +12809,41 @@ describe('OrcaRuntimeService', () => {
     const runtime = new OrcaRuntimeService(runtimeStore)
 
     const webContents = { send: vi.fn() }
-    webContents.send.mockImplementation((_channel: string, payload: { requestId: string }) => {
-      runtime.syncWindowGraph(1, {
-        tabs: [],
-        leaves: [
+    webContents.send.mockImplementation(
+      (channel: string, payload: { requestId: string; tabId: string }) => {
+        if (channel !== 'terminal:requestTabCreate') {
+          return
+        }
+        runtime.syncWindowGraph(1, {
+          tabs: [],
+          leaves: [
+            {
+              tabId: payload.tabId,
+              worktreeId: TEST_WORKTREE_ID,
+              leafId: 'pane:1',
+              paneRuntimeId: 1,
+              ptyId: 'pty-renderer',
+              paneTitle: null
+            }
+          ]
+        })
+        ipcMain.emit(
+          'terminal:tabCreateReply',
+          { sender: webContents },
           {
-            tabId: 'tab-renderer',
-            worktreeId: TEST_WORKTREE_ID,
-            leafId: 'pane:1',
-            paneRuntimeId: 1,
-            ptyId: 'pty-renderer',
-            paneTitle: null
+            requestId: payload.requestId,
+            tabId: payload.tabId,
+            title: 'Codex',
+            identity: {
+              worktreeId: TEST_WORKTREE_ID,
+              tabId: payload.tabId,
+              leafId: 'pane:1',
+              ptyId: 'pty-renderer'
+            }
           }
-        ]
-      })
-      ipcMain.emit(
-        'terminal:tabCreateReply',
-        { sender: webContents },
-        { requestId: payload.requestId, tabId: 'tab-renderer', title: 'Codex' }
-      )
-    })
+        )
+      }
+    )
     runtime.attachWindow(1)
     runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
     electronMocks.BrowserWindow.fromId.mockReturnValue({
@@ -12845,6 +12860,8 @@ describe('OrcaRuntimeService', () => {
       'terminal:requestTabCreate',
       expect.objectContaining({
         worktreeId: TEST_WORKTREE_ID,
+        tabId: expect.stringMatching(UUID_RE),
+        requireRegisteredIdentity: true,
         command: "codex '--dangerously-bypass-approvals-and-sandbox'",
         env: { CODEX_PROFILE: 'captured' },
         launchAgent: 'codex',
@@ -13476,7 +13493,12 @@ describe('OrcaRuntimeService', () => {
 
   it('accepts renderer-backed terminal create replies only from the target renderer', async () => {
     const webContents = { send: vi.fn() }
-    const send = vi.fn((_channel: string, payload: { requestId: string }) => {
+    let createdTabId = ''
+    const send = vi.fn((channel: string, payload: { requestId: string; tabId: string }) => {
+      if (channel !== 'terminal:requestTabCreate') {
+        return
+      }
+      createdTabId = payload.tabId
       ipcMain.emit(
         'terminal:tabCreateReply',
         { sender: { send: vi.fn() } },
@@ -13485,7 +13507,7 @@ describe('OrcaRuntimeService', () => {
       runtime.syncWindowGraph(1, {
         tabs: [
           {
-            tabId: 'tab-renderer',
+            tabId: payload.tabId,
             worktreeId: TEST_WORKTREE_ID,
             title: 'Renderer Terminal',
             activeLeafId: 'pane:1',
@@ -13494,7 +13516,7 @@ describe('OrcaRuntimeService', () => {
         ],
         leaves: [
           {
-            tabId: 'tab-renderer',
+            tabId: payload.tabId,
             worktreeId: TEST_WORKTREE_ID,
             leafId: 'pane:1',
             paneRuntimeId: 1,
@@ -13506,7 +13528,17 @@ describe('OrcaRuntimeService', () => {
       ipcMain.emit(
         'terminal:tabCreateReply',
         { sender: webContents },
-        { requestId: payload.requestId, tabId: 'tab-renderer', title: 'Renderer Terminal' }
+        {
+          requestId: payload.requestId,
+          tabId: payload.tabId,
+          title: 'Renderer Terminal',
+          identity: {
+            worktreeId: TEST_WORKTREE_ID,
+            tabId: payload.tabId,
+            leafId: 'pane:1',
+            ptyId: 'pty-renderer'
+          }
+        }
       )
     })
     webContents.send = send
@@ -13518,16 +13550,15 @@ describe('OrcaRuntimeService', () => {
       webContents
     })
 
-    await expect(
-      runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
-        command: 'codex',
-        rendererBacked: true,
-        title: 'Renderer Terminal'
-      })
-    ).resolves.toMatchObject({
+    const result = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      command: 'codex',
+      rendererBacked: true,
+      title: 'Renderer Terminal'
+    })
+    expect(result).toMatchObject({
       handle: expect.stringMatching(/^term_/),
-      tabId: 'tab-renderer',
-      paneKey: 'tab-renderer:1',
+      tabId: createdTabId,
+      paneKey: `${createdTabId}:1`,
       ptyId: 'pty-renderer',
       title: 'Renderer Terminal',
       worktreeId: TEST_WORKTREE_ID,
@@ -13538,17 +13569,23 @@ describe('OrcaRuntimeService', () => {
       expect.objectContaining({
         requestId: expect.any(String),
         worktreeId: TEST_WORKTREE_ID,
+        tabId: expect.stringMatching(UUID_RE),
+        requireRegisteredIdentity: true,
         command: "codex '--dangerously-bypass-approvals-and-sandbox'",
         title: 'Renderer Terminal'
       })
     )
+    expect(send).toHaveBeenCalledWith('terminal:settleTabCreate', {
+      requestId: expect.any(String),
+      accepted: true
+    })
     expect(electronMocks.ipcMain.removeListener).toHaveBeenCalledWith(
       'terminal:tabCreateReply',
       expect.any(Function)
     )
   })
 
-  it('closes a renderer-created tab when its registered leaf has no PTY identity', async () => {
+  it('rejects a renderer-created tab with no PTY identity through renderer-owned cleanup', async () => {
     const closeTerminal = vi.fn()
     const webContents = { send: vi.fn() }
     const runtime = new OrcaRuntimeService(store)
@@ -13566,54 +13603,47 @@ describe('OrcaRuntimeService', () => {
       terminalFitOverrideChanged: vi.fn(),
       terminalDriverChanged: vi.fn()
     })
-    const send = vi.fn((_channel: string, payload: { requestId: string }) => {
+    let createdTabId = ''
+    const send = vi.fn((channel: string, payload: { requestId: string; tabId: string }) => {
+      if (channel !== 'terminal:requestTabCreate') {
+        return
+      }
+      createdTabId = payload.tabId
+      runtime.syncWindowGraph(1, {
+        tabs: [
+          {
+            tabId: payload.tabId,
+            worktreeId: TEST_WORKTREE_ID,
+            title: 'Renderer Terminal',
+            activeLeafId: 'pane:1',
+            layout: null
+          }
+        ],
+        leaves: [
+          {
+            tabId: payload.tabId,
+            worktreeId: TEST_WORKTREE_ID,
+            leafId: 'pane:1',
+            paneRuntimeId: 1,
+            ptyId: null
+          }
+        ]
+      })
       ipcMain.emit(
         'terminal:tabCreateReply',
         { sender: webContents },
-        { requestId: payload.requestId, tabId: 'tab-renderer', title: 'Renderer Terminal' }
+        {
+          requestId: payload.requestId,
+          tabId: payload.tabId,
+          title: 'Renderer Terminal',
+          identity: {
+            worktreeId: TEST_WORKTREE_ID,
+            tabId: payload.tabId,
+            leafId: 'pane:1',
+            ptyId: 'pty-renderer'
+          }
+        }
       )
-      setTimeout(() => {
-        runtime.syncWindowGraph(1, {
-          tabs: [
-            {
-              tabId: 'tab-renderer',
-              worktreeId: TEST_WORKTREE_ID,
-              title: 'Renderer Terminal',
-              activeLeafId: 'pane:1',
-              layout: null
-            }
-          ],
-          leaves: [
-            {
-              tabId: 'tab-renderer',
-              worktreeId: TEST_WORKTREE_ID,
-              leafId: 'pane:1',
-              paneRuntimeId: 1,
-              ptyId: 'pty-renderer'
-            }
-          ]
-        })
-        runtime.syncWindowGraph(1, {
-          tabs: [
-            {
-              tabId: 'tab-renderer',
-              worktreeId: TEST_WORKTREE_ID,
-              title: 'Renderer Terminal',
-              activeLeafId: 'pane:1',
-              layout: null
-            }
-          ],
-          leaves: [
-            {
-              tabId: 'tab-renderer',
-              worktreeId: TEST_WORKTREE_ID,
-              leafId: 'pane:1',
-              paneRuntimeId: 1,
-              ptyId: null
-            }
-          ]
-        })
-      }, 0)
     })
     webContents.send = send
     runtime.attachWindow(1)
@@ -13630,7 +13660,142 @@ describe('OrcaRuntimeService', () => {
         title: 'Renderer Terminal'
       })
     ).rejects.toThrow('renderer-backed terminal did not register a PTY identity')
-    expect(closeTerminal).toHaveBeenCalledWith('tab-renderer')
+    expect(createdTabId).toMatch(UUID_RE)
+    expect(closeTerminal).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('terminal:settleTabCreate', {
+      requestId: expect.any(String),
+      accepted: false
+    })
+  })
+
+  it('never closes an unvalidated tab id from a mismatched renderer reply', async () => {
+    const closeTerminal = vi.fn()
+    const webContents = { send: vi.fn() }
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setNotifier({
+      worktreesChanged: vi.fn(),
+      reposChanged: vi.fn(),
+      activateWorktree: vi.fn(),
+      createTerminal: vi.fn(),
+      revealTerminalSession: vi.fn(),
+      splitTerminal: vi.fn(),
+      renameTerminal: vi.fn(),
+      focusTerminal: vi.fn(),
+      closeTerminal,
+      sleepWorktree: vi.fn(),
+      terminalFitOverrideChanged: vi.fn(),
+      terminalDriverChanged: vi.fn()
+    })
+    const send = vi.fn((channel: string, payload: { requestId: string; tabId: string }) => {
+      if (channel !== 'terminal:requestTabCreate') {
+        return
+      }
+      ipcMain.emit(
+        'terminal:tabCreateReply',
+        { sender: webContents },
+        {
+          requestId: payload.requestId,
+          tabId: 'existing-unrelated-tab',
+          title: 'Renderer Terminal',
+          identity: {
+            worktreeId: TEST_WORKTREE_ID,
+            tabId: 'existing-unrelated-tab',
+            leafId: 'pane:1',
+            ptyId: 'pty-existing'
+          }
+        }
+      )
+    })
+    webContents.send = send
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    electronMocks.BrowserWindow.fromId.mockReturnValue({
+      isDestroyed: () => false,
+      webContents
+    })
+
+    await expect(
+      runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+        command: 'codex',
+        rendererBacked: true
+      })
+    ).rejects.toThrow('renderer-backed terminal did not register a PTY identity')
+    expect(closeTerminal).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('terminal:settleTabCreate', {
+      requestId: expect.any(String),
+      accepted: false
+    })
+  })
+
+  it('cancels renderer ownership on timeout and ignores a late success reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const closeTerminal = vi.fn()
+      const webContents = { send: vi.fn() }
+      const runtime = new OrcaRuntimeService(store)
+      runtime.setNotifier({
+        worktreesChanged: vi.fn(),
+        reposChanged: vi.fn(),
+        activateWorktree: vi.fn(),
+        createTerminal: vi.fn(),
+        revealTerminalSession: vi.fn(),
+        splitTerminal: vi.fn(),
+        renameTerminal: vi.fn(),
+        focusTerminal: vi.fn(),
+        closeTerminal,
+        sleepWorktree: vi.fn(),
+        terminalFitOverrideChanged: vi.fn(),
+        terminalDriverChanged: vi.fn()
+      })
+      let createRequest: { requestId: string; tabId: string } | null = null
+      const send = vi.fn((channel: string, payload: { requestId: string; tabId: string }) => {
+        if (channel === 'terminal:requestTabCreate') {
+          createRequest = payload
+        }
+      })
+      webContents.send = send
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+      electronMocks.BrowserWindow.fromId.mockReturnValue({
+        isDestroyed: () => false,
+        webContents
+      })
+
+      const create = runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+        command: 'codex',
+        rendererBacked: true
+      })
+      const expectedRejection = expect(create).rejects.toThrow('Terminal creation timed out')
+      await vi.waitFor(() => expect(createRequest).not.toBeNull())
+      await vi.advanceTimersByTimeAsync(10_000)
+      await expectedRejection
+      expect(send).toHaveBeenCalledWith('terminal:settleTabCreate', {
+        requestId: createRequest!.requestId,
+        accepted: false
+      })
+
+      ipcMain.emit(
+        'terminal:tabCreateReply',
+        { sender: webContents },
+        {
+          requestId: createRequest!.requestId,
+          tabId: createRequest!.tabId,
+          identity: {
+            worktreeId: TEST_WORKTREE_ID,
+            tabId: createRequest!.tabId,
+            leafId: 'pane:1',
+            ptyId: 'pty-late'
+          }
+        }
+      )
+      expect(send).not.toHaveBeenCalledWith('terminal:settleTabCreate', {
+        requestId: createRequest!.requestId,
+        accepted: true
+      })
+      expect(closeTerminal).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('splits visible pty-backed terminal sessions through the parent renderer tab', async () => {

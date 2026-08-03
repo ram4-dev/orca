@@ -121,7 +121,10 @@ import {
 } from './orchestration/setup-completion-signal'
 import type { RuntimeOrchestrationEnvelope } from '../../shared/runtime-rpc-envelope'
 import { ORCHESTRATION_MESSAGE_WAIT_DEFAULT_TIMEOUT_MS } from '../../shared/orchestration-message-wait-timeout'
-import type { TerminalRevealIdentity } from '../../shared/terminal-reveal-identity'
+import type {
+  TerminalRevealIdentity,
+  TerminalTabCreateReply
+} from '../../shared/terminal-reveal-identity'
 import type {
   OrchestrationCompatibilityEvidence,
   OrchestrationCompatibilityHostStamp
@@ -24844,72 +24847,97 @@ export class OrcaRuntimeService {
       ? this.resolveWorkspaceTerminalStartupCwd(workspace, launchOpts.cwd)
       : launchOpts.cwd
     const requestId = randomUUID()
-
-    // Why: terminal creation is a renderer-side Zustand store operation (like
-    // browser tab creation). The main process sends a request, the renderer
-    // creates the tab and replies with the tabId so we can resolve the handle.
-    const reply = await new Promise<{ tabId: string; title: string }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        ipcMain.removeListener('terminal:tabCreateReply', handler)
-        reject(new Error('Terminal creation timed out'))
-      }, 10_000)
-
-      const handler = (
-        event: Electron.IpcMainEvent,
-        r: { requestId: string; tabId?: string; title?: string; error?: string }
-      ): void => {
-        if (event.sender !== win.webContents || r.requestId !== requestId) {
-          return
-        }
-        clearTimeout(timer)
-        ipcMain.removeListener('terminal:tabCreateReply', handler)
-        if (r.error) {
-          reject(new Error(r.error))
-        } else {
-          resolve({ tabId: r.tabId!, title: r.title ?? launchOpts.title ?? '' })
+    const requestedTabId = randomUUID()
+    let rendererCreateSettled = false
+    const settleRendererCreate = (accepted: boolean): void => {
+      if (rendererCreateSettled) {
+        return
+      }
+      rendererCreateSettled = true
+      if (!win.webContents.isDestroyed?.()) {
+        try {
+          win.webContents.send('terminal:settleTabCreate', { requestId, accepted })
+        } catch {
+          // The renderer is already unreachable, so no live tab remains to settle.
         }
       }
-      ipcMain.on('terminal:tabCreateReply', handler)
-      win.webContents.send('terminal:requestTabCreate', {
-        requestId,
-        worktreeId,
-        command: launchOpts.command,
-        cwd,
-        ...(launchOpts.env ? { env: launchOpts.env } : {}),
-        ...(launchOpts.launchConfig ? { launchConfig: launchOpts.launchConfig } : {}),
-        ...(launchOpts.resumeProviderSession
-          ? { resumeProviderSession: launchOpts.resumeProviderSession }
-          : {}),
-        ...(launchOpts.launchToken ? { launchToken: launchOpts.launchToken } : {}),
-        ...(launchOpts.launchAgent ? { launchAgent: launchOpts.launchAgent } : {}),
-        ...(launchOpts.viewMode ? { viewMode: launchOpts.viewMode } : {}),
-        startupCommandDelivery: launchOpts.startupCommandDelivery,
-        title: launchOpts.title,
-        activate: presentation === 'focused',
-        ...(presentation ? { presentation } : {}),
-        ...ownerSurfacing(opts.surfaceOwner !== false)
-      })
-    })
-
-    // Why: the renderer created the tab immediately, but the graph sync that
-    // populates this.leaves may not have arrived yet. Wait for the leaf to
-    // appear so we can return a valid handle the caller can use right away.
-    const handle = await this.waitForTerminalHandle(reply.tabId)
-    const record = this.handles.get(handle)
-    const leaf = record ? this.leaves.get(this.getLeafKey(record.tabId, record.leafId)) : null
-    if (!leaf?.ptyId) {
-      this.notifier?.closeTerminal(reply.tabId)
-      throw new Error('renderer-backed terminal did not register a PTY identity')
     }
-    return {
-      handle,
-      tabId: reply.tabId,
-      paneKey: this.makeRuntimePaneKey(leaf),
-      ptyId: leaf.ptyId,
-      worktreeId: leaf.worktreeId,
-      title: reply.title,
-      ...this.getPtyExecutionHostMetadata(leaf.ptyId),
-      surface: 'visible'
+
+    try {
+      // Why: acknowledgement is readiness evidence only after the live pane identity crosses the graph IPC boundary into main.
+      const reply = await new Promise<TerminalTabCreateReply>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          ipcMain.removeListener('terminal:tabCreateReply', handler)
+          settleRendererCreate(false)
+          reject(new Error('Terminal creation timed out'))
+        }, 10_000)
+
+        const handler = (event: Electron.IpcMainEvent, r: TerminalTabCreateReply): void => {
+          if (event.sender !== win.webContents || r.requestId !== requestId) {
+            return
+          }
+          clearTimeout(timer)
+          ipcMain.removeListener('terminal:tabCreateReply', handler)
+          if (r.error) {
+            settleRendererCreate(false)
+            reject(new Error(r.error))
+          } else {
+            resolve(r)
+          }
+        }
+        ipcMain.on('terminal:tabCreateReply', handler)
+        win.webContents.send('terminal:requestTabCreate', {
+          requestId,
+          worktreeId,
+          tabId: requestedTabId,
+          requireRegisteredIdentity: true,
+          command: launchOpts.command,
+          cwd,
+          ...(launchOpts.env ? { env: launchOpts.env } : {}),
+          ...(launchOpts.launchConfig ? { launchConfig: launchOpts.launchConfig } : {}),
+          ...(launchOpts.resumeProviderSession
+            ? { resumeProviderSession: launchOpts.resumeProviderSession }
+            : {}),
+          ...(launchOpts.launchToken ? { launchToken: launchOpts.launchToken } : {}),
+          ...(launchOpts.launchAgent ? { launchAgent: launchOpts.launchAgent } : {}),
+          ...(launchOpts.viewMode ? { viewMode: launchOpts.viewMode } : {}),
+          startupCommandDelivery: launchOpts.startupCommandDelivery,
+          title: launchOpts.title,
+          activate: presentation === 'focused',
+          ...(presentation ? { presentation } : {}),
+          ...ownerSurfacing(opts.surfaceOwner !== false)
+        })
+      })
+      const identity = reply.identity
+      const leaf = identity
+        ? this.leaves.get(this.getLeafKey(identity.tabId, identity.leafId))
+        : null
+      if (
+        reply.tabId !== requestedTabId ||
+        !identity ||
+        identity.tabId !== requestedTabId ||
+        (worktreeId !== undefined && identity.worktreeId !== worktreeId) ||
+        !leaf?.ptyId ||
+        leaf.worktreeId !== identity.worktreeId ||
+        leaf.ptyId !== identity.ptyId
+      ) {
+        settleRendererCreate(false)
+        throw new Error('renderer-backed terminal did not register a PTY identity')
+      }
+      settleRendererCreate(true)
+      return {
+        handle: this.issueHandle(leaf),
+        tabId: reply.tabId,
+        paneKey: this.makeRuntimePaneKey(leaf),
+        ptyId: leaf.ptyId,
+        worktreeId: leaf.worktreeId,
+        title: reply.title ?? launchOpts.title ?? '',
+        ...this.getPtyExecutionHostMetadata(leaf.ptyId),
+        surface: 'visible'
+      }
+    } catch (error) {
+      settleRendererCreate(false)
+      throw error
     }
   }
 
@@ -25822,38 +25850,6 @@ export class OrcaRuntimeService {
     )
   }
 
-  private waitForTerminalHandle(tabId: string, timeoutMs = 10_000): Promise<string> {
-    const existing = this.resolveHandleForTab(tabId)
-    if (existing) {
-      return Promise.resolve(existing)
-    }
-
-    return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = this.graphSyncCallbacks.indexOf(check)
-        if (idx !== -1) {
-          this.graphSyncCallbacks.splice(idx, 1)
-        }
-        reject(new Error('Timed out waiting for terminal handle after creation'))
-      }, timeoutMs)
-
-      const check = (): void => {
-        const handle = this.resolveHandleForTab(tabId)
-        if (handle) {
-          clearTimeout(timer)
-          const idx = this.graphSyncCallbacks.indexOf(check)
-          if (idx !== -1) {
-            this.graphSyncCallbacks.splice(idx, 1)
-          }
-          resolve(handle)
-        }
-      }
-      this.graphSyncCallbacks.push(check)
-      // Why: graph sync may have fired between the initial check and registration; re-check to avoid a missed wake-up.
-      check()
-    })
-  }
-
   // Why: mobile may subscribe before the PTY spawns; wait for it so subscribe proceeds with phone-fit instead of a bare scrollback+end.
   waitForLeafPtyId(handle: string, timeoutMs = 10_000, signal?: AbortSignal): Promise<string> {
     const leaf = this.resolveLeafForHandle(handle)
@@ -26001,15 +25997,6 @@ export class OrcaRuntimeService {
       }
     }
     return count
-  }
-
-  private resolveHandleForTab(tabId: string): string | null {
-    for (const leaf of this.leaves.values()) {
-      if (leaf.tabId === tabId && leaf.ptyId !== null) {
-        return this.issueHandle(leaf)
-      }
-    }
-    return null
   }
 
   async focusTerminal(

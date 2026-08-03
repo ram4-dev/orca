@@ -5,6 +5,9 @@ export type TerminalRevealIdentity = {
   ptyId: string
 }
 
+export const TERMINAL_CREATE_SETTLEMENT_UNAVAILABLE_ERROR =
+  'renderer_terminal_settlement_unavailable'
+
 export type TerminalTabCreateReply = {
   requestId: string
   tabId?: string

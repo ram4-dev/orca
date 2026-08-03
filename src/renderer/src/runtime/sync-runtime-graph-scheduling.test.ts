@@ -6,7 +6,8 @@ import {
   runtimeMobileSessionSyncKeysEqual,
   scheduleRuntimeGraphSync,
   setRuntimeGraphStoreStateGetter,
-  setRuntimeGraphSyncEnabled
+  setRuntimeGraphSyncEnabled,
+  waitForPublishedRuntimeTerminalIdentity
 } from './sync-runtime-graph'
 import type { AppState } from '../store/types'
 import type { TerminalTab } from '../../../shared/types'
@@ -97,6 +98,65 @@ describe('runtime terminal registration ownership', () => {
 })
 
 describe('scheduleRuntimeGraphSync', () => {
+  it('acknowledges a terminal only after its mounted pane and PTY are published', async () => {
+    vi.useFakeTimers()
+    const syncWindowGraph = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('window', { api: { runtime: { syncWindowGraph } } })
+    vi.stubGlobal('HTMLElement', class HTMLElement {})
+    setRuntimeGraphStoreStateGetter(() =>
+      makeState({
+        tabsByWorktree: { 'wt-1': [makeTerminalTab()] } as AppState['tabsByWorktree']
+      })
+    )
+    setRuntimeGraphSyncEnabled(true)
+
+    let settled = false
+    const identityPromise = waitForPublishedRuntimeTerminalIdentity('wt-1', 'term-1').finally(
+      () => {
+        settled = true
+      }
+    )
+    await flushRuntimeGraphSyncTimer()
+    expect(settled).toBe(false)
+
+    const panes: { id: number; leafId: string }[] = []
+    let ptyId: string | null = null
+    const manager = {
+      getActivePane: () => panes[0] ?? null,
+      getPanes: () => panes,
+      getLeafId: (paneId: number) => panes.find((pane) => pane.id === paneId)?.leafId ?? null,
+      getNumericIdForLeaf: (leafId: string) =>
+        panes.find((pane) => pane.leafId === leafId)?.id ?? null
+    }
+    const unregister = registerRuntimeTerminalTab({
+      tabId: 'term-1',
+      worktreeId: 'wt-1',
+      getManager: () => manager as never,
+      getContainer: () => null,
+      getPtyIdForPane: () => ptyId
+    })
+    await flushRuntimeGraphSyncTimer()
+    expect(settled).toBe(false)
+
+    panes.push({ id: 1, leafId: '11111111-1111-4111-8111-111111111111' })
+    ptyId = 'pty-1'
+    scheduleRuntimeGraphSync()
+    await flushRuntimeGraphSyncTimer()
+
+    await expect(identityPromise).resolves.toEqual({
+      worktreeId: 'wt-1',
+      tabId: 'term-1',
+      leafId: '11111111-1111-4111-8111-111111111111',
+      ptyId: 'pty-1'
+    })
+    expect(syncWindowGraph).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        leaves: [expect.objectContaining({ tabId: 'term-1', ptyId: 'pty-1' })]
+      })
+    )
+    unregister()
+  })
+
   it('coalesces updates that arrive while the runtime graph IPC is in flight', async () => {
     vi.useFakeTimers()
     const syncCalls: {
