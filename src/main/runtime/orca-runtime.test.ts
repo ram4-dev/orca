@@ -10707,6 +10707,67 @@ describe('OrcaRuntimeService', () => {
     })
   })
 
+  it('dismisses stale blocked status after a known Codex placeholder composer', async () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      command: 'codex resume --remote unix:///tmp/codex.sock thread-1',
+      launchAgent: 'codex'
+    })
+    runtime.onPtyData(
+      'pty-bg',
+      [
+        'Hooks need review. Press enter to confirm\n',
+        '›Summarize recent commits\n',
+        '  gpt-5.6 · ~/orca/workspaces/orca/controlled-wake\n'
+      ].join(''),
+      Date.now()
+    )
+
+    await expect(runtime.getTerminalAgentStatus(handle)).resolves.toEqual({
+      handle,
+      isRunningAgent: true,
+      status: null
+    })
+    await expect(runtime.isTerminalRunningAgent(handle)).resolves.toBe(true)
+  })
+
+  it('does not dismiss stale blocked status from a generic placeholder composer', async () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`)
+    runtime.onPtyData(
+      'pty-bg',
+      [
+        'Hooks need review. Press enter to confirm\n',
+        '›Summarize recent commits\n',
+        '  project · ~/repo\n'
+      ].join(''),
+      Date.now()
+    )
+
+    await expect(runtime.getTerminalAgentStatus(handle)).resolves.toEqual({
+      handle,
+      isRunningAgent: true,
+      status: 'permission'
+    })
+    await expect(runtime.isTerminalRunningAgent(handle)).resolves.toBe(false)
+  })
+
   it('reports permission from blocked wait text over title-only working state', async () => {
     const runtime = new OrcaRuntimeService(store)
     runtime.setPtyController({
@@ -14494,6 +14555,94 @@ describe('OrcaRuntimeService', () => {
       condition: 'tui-idle',
       satisfied: true,
       status: 'running'
+    })
+  })
+
+  it.each([
+    { model: 'gpt-5.6', path: '~/orca/workspaces/orca/controlled-wake' },
+    { model: 'gpt-5.6', path: '/srv/orca/controlled-wake' },
+    { model: 'gpt-5.6', path: 'C:\\work\\controlled-wake' },
+    { model: 'custom-provider/qwen3-coder', path: '~/orca/custom-model' }
+  ])('resolves tui-idle from the Codex 0.145 composer with $model at $path', async (footer) => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      command: 'codex resume --remote unix:///tmp/codex.sock thread-1',
+      launchAgent: 'codex'
+    })
+    runtime.onPtyData(
+      'pty-bg',
+      [
+        'Choose working directory to resume this session\n',
+        'Press enter to continue\n',
+        '›Summarize recent commits\n',
+        `  ${footer.model} · ${footer.path}\n`
+      ].join(''),
+      Date.now()
+    )
+
+    await expect(
+      runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 1_000 })
+    ).resolves.toMatchObject({
+      handle,
+      condition: 'tui-idle',
+      satisfied: true,
+      status: 'running'
+    })
+  })
+
+  it('does not treat unrelated prompt and bullet/path output as Codex readiness', async () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`)
+    runtime.onPtyData('pty-bg', '›\nproject · ~/repo\n', Date.now())
+
+    await expect(
+      runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 50 })
+    ).rejects.toThrow('timeout')
+  })
+
+  it('keeps a prompt after the Codex 0.145 composer blocked', async () => {
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setPtyController({
+      spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+    const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      command: 'codex resume --remote unix:///tmp/codex.sock thread-1',
+      launchAgent: 'codex'
+    })
+    runtime.onPtyData(
+      'pty-bg',
+      [
+        '›Summarize recent commits\n',
+        '  gpt-5.6 · ~/orca/workspaces/orca/controlled-wake\n',
+        'Hooks need review\n',
+        'Press enter to confirm\n'
+      ].join(''),
+      Date.now()
+    )
+
+    await expect(
+      runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 1_000 })
+    ).resolves.toMatchObject({
+      handle,
+      condition: 'tui-idle',
+      satisfied: false,
+      status: 'running',
+      blockedReason: 'codex-hooks-review-prompt'
     })
   })
 

@@ -215,7 +215,10 @@ import { createCodexSessionMigrationScheduler } from './codex/codex-session-migr
 import { prepareLegacySharedCodexSessionResume } from './codex/codex-legacy-session-resume'
 import { CodexControlledSessionManager } from './codex/codex-controlled-session-manager'
 import { resolveControlledCodexLaunchAuthority } from './codex/codex-controlled-launch-authority'
-import { waitForControlledTerminalReadiness } from './codex/codex-controlled-terminal-readiness'
+import {
+  assertControlledTerminalIdleResult,
+  waitForControlledTerminalReadiness
+} from './codex/codex-controlled-terminal-readiness'
 import { resolveHostCodexSessionSourceHome } from './codex/codex-session-source-home'
 import type { CodexSessionResumePreparation } from './codex/codex-session-resume-home'
 import { prepareCodexSessionResume } from './codex/codex-session-resume-preparation'
@@ -2345,9 +2348,7 @@ void app.whenReady().then(async () => {
             timeoutMs: 15_000,
             signal
           })
-          if (!ready.satisfied || ready.status !== 'running' || ready.blockedReason) {
-            throw new Error('controlled Codex visible terminal did not become ready')
-          }
+          assertControlledTerminalIdleResult(ready)
         },
         observe: async () => {
           proof.assertControllerAlive()
