@@ -232,6 +232,13 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
     expect(fixture.processes[0]?.exitCode).toBe(0)
   })
 
+  it('cleans up a transport that disconnects after renderer identity settlement', async () => {
+    const fixture = createFixture({ disconnectAfterIdentitySettlement: true })
+
+    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow('is disconnected')
+    expect([fixture.closedTerminals.length, fixture.processes[0]?.exitCode]).toEqual([1, 0])
+  })
+
   it.each([
     { terminalSurface: 'background' as const, label: 'background surface' },
     { omitTerminalIdentity: 'pane' as const, label: 'missing pane identity' }
@@ -606,6 +613,7 @@ function createFixture(
   options: {
     launch?: boolean
     readinessError?: Error
+    disconnectAfterIdentitySettlement?: boolean
     driftAfter?: 'initialize' | 'thread/start' | 'thread/resume' | 'thread/read'
     closeVisibleTerminalFailures?: number
     terminalSurface?: 'background' | 'visible'
@@ -783,6 +791,16 @@ function createFixture(
       readinessChecks.value += 1
       proof.assertControllerAlive()
       await proof.waitForRemoteTransport(new AbortController().signal)
+      if (options.disconnectAfterIdentitySettlement) {
+        const visible = visibleConnections[0]
+        if (!visible) {
+          throw new Error('visible transport was not created')
+        }
+        await new Promise<void>((resolve) => {
+          visible.once('close', resolve)
+          visible.terminate()
+        })
+      }
       proof.assertRemoteTransportLive()
       if (driftOnNextReadiness.value) {
         driftOnNextReadiness.value = false

@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, lstatSync, rmSync } from 'node:fs'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
+import { observeControlledWebSocketUpgrade } from './codex-controlled-websocket-upgrade'
 
 const TRANSPORT_READY_TIMEOUT_MS = 10_000
 
@@ -91,34 +92,72 @@ function acceptVisibleConnection(state: TransportState, downstream: Socket): voi
   state.downstream = downstream
   const upstream = createConnection(state.upstreamSocketPath)
   state.upstream = upstream
-  const disconnect = () => disconnectTransport(state)
+  let stopObservingUpgrade: () => void = () => undefined
+  const disconnect = () => {
+    stopObservingUpgrade()
+    disconnectTransport(state, downstream, upstream)
+  }
+  stopObservingUpgrade = observeControlledWebSocketUpgrade(
+    downstream,
+    upstream,
+    () => markTransportLive(state, downstream, upstream),
+    (error) => {
+      stopObservingUpgrade()
+      failTransport(state, error, downstream, upstream)
+    }
+  )
   downstream.once('close', disconnect)
   downstream.once('error', disconnect)
   upstream.once('close', disconnect)
   upstream.once('error', disconnect)
+  downstream.pipe(upstream).pipe(downstream)
   upstream.once('connect', () => {
-    if (state.stopped || downstream.destroyed) {
+    if (
+      state.stopped ||
+      state.downstream !== downstream ||
+      state.upstream !== upstream ||
+      downstream.destroyed
+    ) {
       disconnect()
-      return
     }
-    state.live = true
-    for (const waiter of state.waiters) {
-      waiter.resolve()
-    }
-    state.waiters.clear()
-    downstream.pipe(upstream).pipe(downstream)
   })
 }
 
-function disconnectTransport(state: TransportState): void {
+function markTransportLive(state: TransportState, downstream: Socket, upstream: Socket): void {
+  if (
+    state.stopped ||
+    state.downstream !== downstream ||
+    state.upstream !== upstream ||
+    downstream.destroyed ||
+    upstream.destroyed
+  ) {
+    disconnectTransport(state, downstream, upstream)
+    return
+  }
+  state.live = true
+  for (const waiter of state.waiters) {
+    waiter.resolve()
+  }
+  state.waiters.clear()
+}
+
+function disconnectTransport(state: TransportState, downstream?: Socket, upstream?: Socket): void {
+  if (
+    (downstream !== undefined && state.downstream !== downstream) ||
+    (upstream !== undefined && state.upstream !== upstream)
+  ) {
+    return
+  }
   const wasLive = state.live
   state.live = false
   state.downstream?.destroy()
   state.upstream?.destroy()
   state.downstream = null
   state.upstream = null
-  if (!wasLive && state.accepted) {
-    const error = new Error('controlled Codex visible remote transport disconnected')
+  if (!wasLive && state.accepted && !state.stopped) {
+    const error =
+      state.failure ?? new Error('controlled Codex visible remote transport disconnected')
+    state.failure = error
     for (const waiter of state.waiters) {
       waiter.reject(error)
     }
@@ -131,9 +170,20 @@ function disconnectTransport(state: TransportState): void {
   }
 }
 
-function failTransport(state: TransportState, error: Error): void {
+function failTransport(
+  state: TransportState,
+  error: Error,
+  downstream?: Socket,
+  upstream?: Socket
+): void {
+  if (
+    (downstream !== undefined && state.downstream !== downstream) ||
+    (upstream !== undefined && state.upstream !== upstream)
+  ) {
+    return
+  }
   state.failure = error
-  disconnectTransport(state)
+  disconnectTransport(state, downstream, upstream)
   for (const waiter of state.waiters) {
     waiter.reject(error)
   }
