@@ -114,6 +114,7 @@ import { singlePaneLayoutSnapshot } from '@/store/slices/terminal-helpers'
 import { buildWorkspaceSessionPayload } from '@/lib/workspace-session'
 import { persistWorkspaceSessionByHost } from '@/lib/workspace-session-host-persistence'
 import { verifyTerminalRevealIdentity } from '@/lib/terminal-reveal-identity'
+import { TERMINAL_CREATE_SETTLEMENT_UNAVAILABLE_ERROR } from '../../../shared/terminal-reveal-identity'
 import { getLinearIssueWorkspaceName } from '../../../shared/workspace-name'
 import type { RuntimeClientEvent } from '../../../shared/runtime-client-events'
 import { applyHostWorktreeTerminalSleepState } from '@/components/terminal-pane/pty-shutdown-exit-deferral'
@@ -1712,7 +1713,7 @@ export function useIpcEvents(): void {
           if (data.requireRegisteredIdentity && !window.api.ui.onSettleTerminalCreate) {
             window.api.ui.replyTerminalCreate({
               requestId: data.requestId,
-              error: 'Renderer terminal settlement is unavailable'
+              error: TERMINAL_CREATE_SETTLEMENT_UNAVAILABLE_ERROR
             })
             return
           }
