@@ -8,7 +8,7 @@ import type {
 } from './ssh-types'
 import type { Automation, AutomationExecutionTargetType, AutomationRun } from './automations-types'
 import type { WorkspaceSource } from './workspace-source'
-import type { ReleaseBuild, ReleaseChannel } from './release-channel'
+import type { DedicatedRepoChannel, ReleaseBuild, ReleaseChannel } from './release-channel'
 import type { GitHubProjectSettings } from './github-project-types'
 import type {
   AgentStatusState,
@@ -982,8 +982,6 @@ export type BrowserPage = {
   canGoForward: boolean
   loadError: BrowserLoadError | null
   createdAt: number
-  // Why: CLI-created pages retain Chromium's native window.close behavior; ordinary embedded pages are guarded.
-  allowWindowClose?: boolean
   // Why: remote-owned worktrees can still host client-local fallback browser
   // pages until headless remote runtimes support real browser panes.
   browserRuntimeEnvironmentId?: string | null
@@ -2389,7 +2387,9 @@ export type UpdateCheckOptions = {
   targetTag?: string
 }
 
-export type UpdateSource = 'local' | 'hourly'
+/** Non-release origins for an update. Derived from the dev-channel list so a new
+ *  channel with its own repo cannot be reported as an ordinary release. */
+export type UpdateSource = 'local' | DedicatedRepoChannel
 
 export type UpdateStatus = (
   | { state: 'idle' }
@@ -3263,6 +3263,7 @@ export type StatusBarItem =
   | 'grok'
   | 'ssh'
   | 'resource-usage'
+  | 'orchestration-usage'
   | 'ports'
 export type FloatingTerminalTriggerLocation = 'floating-button' | 'status-bar'
 
@@ -3391,6 +3392,8 @@ export type PersistedUIState = {
   _antigravityStatusBarDefaultAdded?: boolean
   /** One-shot migration flag for adding the default-on Grok status item. */
   _grokStatusBarDefaultAdded?: boolean
+  /** One-shot migration flag for adding the default-on orchestration usage status item. */
+  _orchestrationUsageStatusBarDefaultAdded?: boolean
   statusBarItems: StatusBarItem[]
   statusBarVisible: boolean
   /** Why: this is client-side presentation, not a provider/account or execution-host setting. */

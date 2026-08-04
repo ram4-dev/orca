@@ -18,12 +18,14 @@ import type { AutomationRunUsage } from '../../shared/automations-types'
 import type { Store } from '../persistence'
 import { loadKnownUsageWorktreesByRepo, type UsageWorktreeRef } from '../usage-worktree-metadata'
 import type { CodexUsagePersistedState } from './types'
-import { createWorktreeRefs, scanCodexUsageFiles } from './scanner'
+import { createWorktreeRefs } from '../usage/usage-worktree-refs'
+import { CODEX_USAGE_SCHEMA_VERSION, codexUsageProvider } from './codex-usage-provider'
+import type {
+  OrchestrationReportUsageSession,
+  OrchestrationReportUsageSnapshot
+} from '../../shared/orchestration-cost-report'
 
-// Why: v5 keys Codex ownership on raw token_count identity without session id
-// so forks that rewrite session_meta still match. Older caches used session-
-// scoped keys and can double-count after fork/resume (#8006).
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = CODEX_USAGE_SCHEMA_VERSION
 const STALE_MS = 5 * 60_000
 const AUTOMATION_ATTRIBUTION_WINDOW_MS = 5 * 60_000
 
@@ -421,6 +423,77 @@ export class CodexUsageStore {
     }
   }
 
+  getOrchestrationReportUsage(limit: number): OrchestrationReportUsageSnapshot {
+    const status = this.state.scanState.enabled
+      ? this.state.scanState.lastScanError
+        ? 'error'
+        : this.scanPromise
+          ? 'scanning'
+          : this.state.scanState.lastScanCompletedAt === null
+            ? 'uninitialized'
+            : Date.now() - this.state.scanState.lastScanCompletedAt >= STALE_MS
+              ? 'stale'
+              : 'available'
+      : 'disabled'
+    const sourceSessions = status === 'available' ? this.state.sessions : []
+    const sessions = sourceSessions.slice(0, limit).map((session) => {
+      const worktreeIds = new Set(session.locationBreakdown.map((row) => row.worktreeId))
+      const worktreeId =
+        worktreeIds.size === 1 && !worktreeIds.has(null) ? ([...worktreeIds][0] as string) : null
+      const costs = session.modelBreakdown.map((row) =>
+        estimateCostUsd(row.modelKey, row.inputTokens, row.cachedInputTokens, row.outputTokens)
+      )
+      const knownCosts = costs.filter((cost): cost is number => cost !== null)
+      const record: OrchestrationReportUsageSession = {
+        provider: 'codex',
+        sessionId: session.sessionId,
+        firstTimestamp: session.firstTimestamp,
+        lastTimestamp: session.lastTimestamp,
+        worktreeId,
+        locationStatus: worktreeId ? 'exact' : worktreeIds.size > 1 ? 'mixed' : 'unavailable',
+        model: session.primaryModel,
+        metrics: {
+          inputTokens: session.totalInputTokens,
+          cachedInputTokens: session.totalCachedInputTokens,
+          outputTokens: session.totalOutputTokens,
+          reasoningOutputTokens: session.totalReasoningOutputTokens,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          totalTokens: session.totalTokens,
+          estimatedCostUsd:
+            knownCosts.length > 0 ? knownCosts.reduce((sum, cost) => sum + cost, 0) : null,
+          costStatus:
+            knownCosts.length === costs.length && costs.length > 0
+              ? 'known'
+              : knownCosts.length > 0
+                ? 'partial'
+                : 'unavailable'
+        }
+      }
+      return record
+    })
+    return {
+      provider: 'codex',
+      status,
+      lastScanCompletedAt: this.state.scanState.lastScanCompletedAt,
+      message:
+        status === 'disabled'
+          ? 'Codex usage tracking is disabled.'
+          : status === 'error'
+            ? 'Codex usage scan failed.'
+            : status === 'uninitialized'
+              ? 'Codex usage has not completed an initial scan.'
+              : status === 'stale'
+                ? 'Codex usage snapshot is stale.'
+                : status === 'scanning'
+                  ? 'Codex usage scan is incomplete.'
+                  : null,
+      limitations: [],
+      sessions,
+      truncated: sourceSessions.length > limit
+    }
+  }
+
   getSnapshot(
     scope: CodexUsageScope,
     range: CodexUsageRange,
@@ -467,7 +540,7 @@ export class CodexUsageStore {
         const repos = this.store.getRepos()
         const worktreesByRepo = loadKnownUsageWorktreesByRepo(this.store, repos)
         const worktreeFingerprint = getWorktreeFingerprint(worktreesByRepo)
-        const result = await scanCodexUsageFiles(
+        const result = await codexUsageProvider.scan(
           createWorktreeRefs(repos, worktreesByRepo),
           this.state.worktreeFingerprint === worktreeFingerprint ? this.state.processedFiles : []
         )

@@ -10,6 +10,7 @@ import {
 } from '../../../../shared/tui-agent-launch-defaults'
 import { isTuiAgent } from '../../../../shared/tui-agent-config'
 import { isTaskProvider } from '../../../../shared/task-providers'
+import { isReleaseChannel, type ReleaseChannel } from '../../../../shared/release-channel'
 import { normalizeDisabledTuiAgents } from '../../../../shared/tui-agent-selection'
 import { normalizePRBotAuthorOverrides } from '../../../../shared/pr-bot-author-overrides'
 import {
@@ -20,6 +21,7 @@ import { isPluginPanelTabKey } from '../../../../shared/plugins/plugin-manifest'
 import type { TaskProvider } from '../../../../shared/types'
 import { TaskResumeState } from './task-resume-state-schema'
 import { omitUndefinedValues, tolerateUnknownValues } from './ui-update-value-tolerance'
+import { ClientUiStatusBarItem } from './client-ui-status-bar-schema'
 
 const NullableString = z.string().nullable()
 const StringArray = z.array(z.string())
@@ -56,19 +58,6 @@ const RightSidebarTabParam = z.custom<StaticRightSidebarTab | `plugin:${string}`
   { message: 'Unknown right sidebar tab' }
 )
 const AgentActivityDisplayMode = z.enum(['compact', 'full'])
-const StatusBarItem = z.enum([
-  'claude',
-  'codex',
-  'gemini',
-  'antigravity',
-  'opencode-go',
-  'kimi',
-  'minimax',
-  'grok',
-  'ssh',
-  'resource-usage',
-  'ports'
-])
 const WorkspaceStatusDefinition = z.object({
   id: z.string(),
   label: z.string(),
@@ -237,12 +226,13 @@ const UiUpdateFields = z
     _workspaceStatusesReorderedDefaultRepaired: z.boolean().optional(),
     _workspaceStatusesDefaultWorkflowMigrated: z.boolean().optional(),
     _workspaceStatusesDefaultVisualsMigrated: z.boolean().optional(),
-    statusBarItems: z.array(StatusBarItem).optional(),
+    statusBarItems: z.array(ClientUiStatusBarItem).optional(),
     _portsStatusBarDefaultAdded: z.boolean().optional(),
     _kimiStatusBarDefaultAdded: z.boolean().optional(),
     _minimaxStatusBarDefaultAdded: z.boolean().optional(),
     _antigravityStatusBarDefaultAdded: z.boolean().optional(),
     _grokStatusBarDefaultAdded: z.boolean().optional(),
+    _orchestrationUsageStatusBarDefaultAdded: z.boolean().optional(),
     statusBarVisible: z.boolean().optional(),
     usagePercentageDisplay: z.enum(['used', 'remaining']).optional(),
     statusBarUsageMode: z.enum(['verbose', 'compact']).optional(),
@@ -250,7 +240,10 @@ const UiUpdateFields = z
     lastUpdateCheckAt: z.number().finite().nullable().optional(),
     pendingUpdateNudgeId: NullableString.optional(),
     dismissedUpdateNudgeId: NullableString.optional(),
-    releaseChannelOverride: z.enum(['stable', 'rc', 'hourly']).nullable().optional(),
+    // Why the predicate rather than an inline z.enum: an enum here is a copy of
+    // RELEASE_CHANNELS, and a copy that drifts silently rejects the new
+    // channel's override on its way here — the picker moves, nothing installs.
+    releaseChannelOverride: z.custom<ReleaseChannel>(isReleaseChannel).nullable().optional(),
     notificationPermissionRequested: z.boolean().optional(),
     updateReassuranceSeen: z.boolean().optional(),
     osc52ClipboardDefaultOnNoticePending: z.boolean().optional(),
