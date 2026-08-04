@@ -22,6 +22,7 @@ import type {
   RuntimeMobileSessionTabsSnapshot,
   RuntimeSyncWindowGraph
 } from '../../../shared/runtime-types'
+import type { TerminalRevealIdentity } from '../../../shared/terminal-reveal-identity'
 import { isTerminalLeafId, makePaneKey } from '../../../shared/stable-pane-id'
 import { isWebTerminalSurfaceTabId } from '../../../shared/terminal-surface-id'
 import { isClaudeManagementTitle } from '../../../shared/agent-detection'
@@ -81,6 +82,14 @@ type AgentStatusProjectionCache = {
 }
 
 const registeredTabs = new Map<string, RegisteredTerminalTab>()
+type TerminalIdentityWaiter = {
+  worktreeId: string
+  tabId: string
+  resolve: (identity: TerminalRevealIdentity) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const terminalIdentityWaiters = new Set<TerminalIdentityWaiter>()
 // Why: registration time suppresses the "no live transport" warning during the async PTY-connect window; after the grace period it's a real stuck state.
 const tabRegisteredAt = new Map<string, number>()
 const NO_TRANSPORT_GRACE_MS = 10_000
@@ -156,6 +165,30 @@ export function hasRegisteredRuntimeTerminalTab(tabId: string): boolean {
   return registeredTabs.has(tabId)
 }
 
+export function waitForPublishedRuntimeTerminalIdentity(
+  worktreeId: string,
+  tabId: string,
+  timeoutMs = 10_000
+): Promise<TerminalRevealIdentity> {
+  if (!syncEnabled) {
+    return Promise.reject(new Error('runtime_graph_sync_unavailable'))
+  }
+  return new Promise<TerminalRevealIdentity>((resolve, reject) => {
+    const waiter: TerminalIdentityWaiter = {
+      worktreeId,
+      tabId,
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        terminalIdentityWaiters.delete(waiter)
+        reject(new Error('Timed out waiting for renderer terminal identity'))
+      }, timeoutMs)
+    }
+    terminalIdentityWaiters.add(waiter)
+    scheduleRuntimeGraphSync()
+  })
+}
+
 export function registerRuntimeTerminalTab(tab: RegisteredTerminalTab): () => void {
   registeredTabs.set(tab.tabId, tab)
   tabRegisteredAt.set(tab.tabId, Date.now())
@@ -193,6 +226,11 @@ export function focusRuntimeTerminalSurface(tabId: string, leafId?: string | nul
 export function setRuntimeGraphSyncEnabled(enabled: boolean): void {
   syncEnabled = enabled
   if (!enabled) {
+    for (const waiter of terminalIdentityWaiters) {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('runtime_graph_sync_unavailable'))
+    }
+    terminalIdentityWaiters.clear()
     syncPendingAfterFlight = false
     clearScheduledRuntimeGraphSync()
     return
@@ -740,6 +778,7 @@ async function syncRuntimeGraph(): Promise<void> {
 
   try {
     const result = await window.api.runtime.syncWindowGraph(graph)
+    resolvePublishedTerminalIdentityWaiters(graph)
     const currentState = getStoreState()
     currentState?.setRuntimeAgentOrchestrationByPaneKey?.(result?.agentOrchestrationByPaneKey ?? {})
     for (const resolution of result?.nativeChatLaunchDraftResolutions ?? []) {
@@ -752,6 +791,38 @@ async function syncRuntimeGraph(): Promise<void> {
     }
   } catch (error) {
     console.error('[runtime] Failed to sync renderer graph:', error)
+  }
+}
+
+function resolvePublishedTerminalIdentityWaiters(graph: RuntimeSyncWindowGraph): void {
+  for (const waiter of terminalIdentityWaiters) {
+    const tab = graph.tabs.find(
+      (candidate) => candidate.tabId === waiter.tabId && candidate.worktreeId === waiter.worktreeId
+    )
+    if (!tab) {
+      continue
+    }
+    const liveLeaves = graph.leaves.filter(
+      (leaf) =>
+        leaf.tabId === waiter.tabId &&
+        leaf.worktreeId === waiter.worktreeId &&
+        typeof leaf.ptyId === 'string' &&
+        leaf.ptyId.length > 0
+    )
+    const leaf =
+      liveLeaves.find((candidate) => candidate.leafId === tab.activeLeafId) ??
+      (liveLeaves.length === 1 ? liveLeaves[0] : undefined)
+    if (!leaf?.ptyId) {
+      continue
+    }
+    clearTimeout(waiter.timer)
+    terminalIdentityWaiters.delete(waiter)
+    waiter.resolve({
+      worktreeId: waiter.worktreeId,
+      tabId: waiter.tabId,
+      leafId: leaf.leafId,
+      ptyId: leaf.ptyId
+    })
   }
 }
 

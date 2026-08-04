@@ -17,6 +17,7 @@ export function createControlledSessionFence(
   return () =>
     context.isProviderAvailable() &&
     !session.missing &&
+    session.visibleTransport.isLive() &&
     context.getCurrentSession(launch.conversationId) === session &&
     isSameControlledLaunch(session.launch, launch) &&
     context.resolveCurrentAccountId() === launch.accountId &&

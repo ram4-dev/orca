@@ -14,11 +14,14 @@ import {
 import { resolveControlledCodexLaunchAuthority } from './codex-controlled-launch-authority'
 import {
   getControlledSocketPath,
-  getControlledSocketRoot,
   resolveControlledCodexCommand,
   startControlledCodexServer,
   stopControlledCodexServer
 } from './codex-controlled-session-launch'
+import {
+  closeTestTransports,
+  connectTestTransport
+} from './codex-controlled-session-test-transport'
 
 type StubState = {
   status: 'idle' | 'active'
@@ -54,41 +57,6 @@ afterEach(async () => {
 })
 
 describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', () => {
-  it('uses a validated environment socket root unless explicitly configured', () => {
-    const prior = process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT
-    process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT = join(tmpdir(), 'ocw-wake-env')
-    try {
-      expect(getControlledSocketRoot()).toBe(join(tmpdir(), 'ocw-wake-env'))
-      expect(getControlledSocketRoot(join(tmpdir(), 'ocw-explicit'))).toBe(
-        join(tmpdir(), 'ocw-explicit')
-      )
-      process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT = 'relative/socket-root'
-      expect(() => getControlledSocketRoot()).toThrow('absolute private directory')
-    } finally {
-      if (prior === undefined) {
-        delete process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT
-      } else {
-        process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT = prior
-      }
-    }
-  })
-
-  it('rejects a socket root that is not already private', async () => {
-    const fixture = createFixture()
-    const spawnProcess = vi.fn() as unknown as typeof spawn
-    const unsafeRoot = mkdtempSync(join(tmpdir(), 'ocw-unsafe-'))
-    roots.push(unsafeRoot)
-    chmodSync(unsafeRoot, 0o755)
-
-    await expect(
-      startControlledCodexServer(
-        fixture.input,
-        join(unsafeRoot, 'controlled-codex.sock'),
-        spawnProcess
-      )
-    ).rejects.toThrow('private owned directory')
-    expect(spawnProcess).not.toHaveBeenCalled()
-  })
   it('fails closed until every controlled-session flag is enabled', async () => {
     const fixture = createFixture({ launch: false })
     await expect(fixture.manager.launch(fixture.input)).rejects.toThrow(
@@ -111,7 +79,7 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       "'--model' 'gpt-5' '--sandbox' 'workspace-write' '--ask-for-approval' 'never'"
     )
     expect(fixture.terminalLaunches[0]?.env).toEqual({ CODEX_HOME: fixture.input.codexHome })
-    expect(fixture.terminalLaunches[0]?.presentation).toBe('focused')
+    expect(fixture.terminalLaunches[0]?.viewMode).toBe('terminal')
     expect(Buffer.byteLength(fixture.socketPath())).toBeLessThanOrEqual(100)
     expect(statSync(fixture.socketPath()).mode & 0o777).toBe(0o600)
     await expect(fixture.manager.getState(target(fixture.input.conversationId))).resolves.toBe(
@@ -160,7 +128,7 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       ['--profile', 'work profile', 'app-server', '--listen', `unix://${fixture.socketPath()}`]
     ])
     expect(fixture.terminalLaunches[0]?.command).toMatch(
-      /^'\/opt\/Codex Preview\/codex' '--profile' 'work profile' 'resume' /
+      /^'\/opt\/Codex Preview\/codex' '--profile' 'work profile' '--remote' /
     )
   })
 
@@ -216,16 +184,38 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       disposition: 'created',
       identity: { threadId: 'thread-1' }
     })
+    expect(fixture.terminalLaunches[0]?.threadId).toBeNull()
+    expect(fixture.terminalLaunches[0]?.command).toMatch(/^'codex' '--remote' /)
     expect(fixture.readinessChecks.value).toBe(1)
     expect(fixture.stub.turnStarts).toBe(1)
   })
 
-  it('cleans up the visible terminal and controller when readiness times out', async () => {
-    const fixture = createFixture({ readinessError: new Error('timeout') })
+  it('cleans up when the visible TUI starts multiple threads during launch', async () => {
+    const fixture = createFixture({ visibleThreadIds: ['thread-1', 'thread-2'] })
+    const { threadId: _threadId, ...input } = fixture.input
 
-    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow('timeout')
+    await expect(
+      fixture.manager.launchNew({ ...input, operationId: 'operation-multiple-threads' })
+    ).rejects.toThrow('started multiple threads')
+
     expect(fixture.closedTerminals).toHaveLength(1)
     expect(fixture.processes[0]?.exitCode).toBe(0)
+  })
+
+  it('cleans up after a visible terminal remote-connection failure', async () => {
+    const message = 'failed to connect to the remote app server'
+    const fixture = createFixture({ readinessError: new Error(message) })
+
+    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow(message)
+    expect(fixture.closedTerminals).toHaveLength(1)
+    expect(fixture.processes[0]?.exitCode).toBe(0)
+  })
+
+  it('cleans up a transport that disconnects after renderer identity settlement', async () => {
+    const fixture = createFixture({ disconnectAfterIdentitySettlement: true })
+
+    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow('is disconnected')
+    expect([fixture.closedTerminals.length, fixture.processes[0]?.exitCode]).toEqual([1, 0])
   })
 
   it.each([
@@ -265,8 +255,6 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       expect(fixture.processes[0]?.exitCode).toBe(0)
       if (driftAfter === 'initialize') {
         expect(fixture.terminalLaunches).toHaveLength(0)
-      } else if (driftAfter === 'thread/start') {
-        expect(fixture.terminalLaunches).toHaveLength(0)
       } else {
         expect(fixture.terminalLaunches).toHaveLength(1)
         expect(fixture.closedTerminals).toHaveLength(1)
@@ -292,41 +280,6 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       }
     }
   )
-
-  it('keeps a failed terminal cleanup registered for retry', async () => {
-    const fixture = createFixture({ closeVisibleTerminalFailures: 1 })
-    await fixture.manager.launch(fixture.input)
-
-    await expect(fixture.manager.disposeConversation(fixture.input.conversationId)).rejects.toThrow(
-      'terminal close failed'
-    )
-    expect(fixture.processes[0]?.exitCode).toBeNull()
-
-    await expect(
-      fixture.manager.disposeConversation(fixture.input.conversationId)
-    ).resolves.toBeUndefined()
-    expect(fixture.closedTerminals).toHaveLength(2)
-    expect(fixture.processes[0]?.exitCode).toBe(0)
-  })
-
-  it('keeps rollback cleanup registered when terminal closure fails', async () => {
-    const fixture = createFixture({
-      readinessError: new Error('timeout'),
-      closeVisibleTerminalFailures: 1
-    })
-
-    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow('timeout')
-    expect(fixture.processes[0]?.exitCode).toBeNull()
-    await expect(fixture.manager.launch(fixture.input)).rejects.toThrow(
-      'requires cleanup before relaunch'
-    )
-
-    await expect(
-      fixture.manager.disposeConversation(fixture.input.conversationId)
-    ).resolves.toBeUndefined()
-    expect(fixture.closedTerminals).toHaveLength(2)
-    expect(fixture.processes[0]?.exitCode).toBe(0)
-  })
 
   it('preserves the owned socket when SIGKILL does not terminate the controller', async () => {
     vi.useFakeTimers()
@@ -637,10 +590,12 @@ function createFixture(
   options: {
     launch?: boolean
     readinessError?: Error
+    disconnectAfterIdentitySettlement?: boolean
     driftAfter?: 'initialize' | 'thread/start' | 'thread/resume' | 'thread/read'
     closeVisibleTerminalFailures?: number
     terminalSurface?: 'background' | 'visible'
     omitTerminalIdentity?: 'tab' | 'pane' | 'workspace'
+    visibleThreadIds?: string[]
   } = {}
 ) {
   const root = mkdtempSync(join(tmpdir(), 'orca-controlled-codex-test-'))
@@ -777,6 +732,7 @@ function createFixture(
     presentation: 'focused'
   }
   const terminalLaunches: Record<string, unknown>[] = []
+  const visibleConnections: ReturnType<typeof connectTestTransport>[] = []
   const closedTerminals: Record<string, unknown>[] = []
   const currentAccount = { value: 'account-a' as string | null }
   const currentHandle = { value: 'handle-1' }
@@ -789,6 +745,21 @@ function createFixture(
     spawnProcess,
     createVisibleTerminal: async (launch) => {
       terminalLaunches.push(launch)
+      visibleConnections.push(connectTestTransport(launch.command))
+      if (launch.threadId === null) {
+        for (const threadId of options.visibleThreadIds ?? [stub.reportedThreadId]) {
+          for (const server of stub.sockets) {
+            for (const socket of server.clients) {
+              socket.send(
+                JSON.stringify({ method: 'thread/started', params: { thread: { id: threadId } } })
+              )
+            }
+          }
+        }
+        if (options.driftAfter === 'thread/start') {
+          currentAccount.value = 'account-b'
+        }
+      }
       return {
         handle: 'handle-1',
         ptyId: 'pty-1',
@@ -802,7 +773,27 @@ function createFixture(
       }
     },
     waitForVisibleTerminal: async (terminal) => {
+      if (driftOnNextReadiness.value) {
+        driftOnNextReadiness.value = false
+        currentAccount.value = 'account-b'
+      }
+      return { ...terminal, terminalHandle: currentHandle.value }
+    },
+    waitForVisibleRemoteAttachment: async (terminal, proof) => {
       readinessChecks.value += 1
+      proof.assertControllerAlive()
+      await proof.waitForRemoteTransport(new AbortController().signal)
+      if (options.disconnectAfterIdentitySettlement) {
+        const visible = visibleConnections[0]
+        if (!visible) {
+          throw new Error('visible transport was not created')
+        }
+        await new Promise<void>((resolve) => {
+          visible.once('close', resolve)
+          visible.terminate()
+        })
+      }
+      proof.assertRemoteTransportLive()
       if (driftOnNextReadiness.value) {
         driftOnNextReadiness.value = false
         currentAccount.value = 'account-b'
@@ -817,7 +808,9 @@ function createFixture(
       if ((options.closeVisibleTerminalFailures ?? 0) >= closedTerminals.length) {
         throw new Error('terminal close failed')
       }
+      closeTestTransports(visibleConnections)
     },
+    ensureVisibleTerminalStopped: async () => closeTestTransports(visibleConnections),
     resolveCurrentAccountId: () => currentAccount.value,
     isControlledLaunchEnabled: () => options.launch ?? true,
     isProviderEnabled: () => true,

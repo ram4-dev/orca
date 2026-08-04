@@ -1,29 +1,33 @@
 import type { CodexUnixAppServerClient } from './codex-unix-app-server-client'
-import { CodexControlledSessionDisposalFence } from './codex-controlled-session-disposal-fence'
+import { CodexControlledFailedLaunchCleanupRegistry } from './codex-controlled-failed-launch-cleanup'
+import { CodexControlledSessionCleanupCoordinator } from './codex-controlled-session-cleanup-coordinator'
+import { CodexControlledSessionLifecycle } from './codex-controlled-session-lifecycle'
 import { trackControlledSessionLaunch } from './codex-controlled-session-launch-tracker'
+import { createReadyControlledNewThreadTerminal } from './codex-controlled-new-thread-terminal'
 import {
   assertControlledThreadAlive,
   buildControlledThreadResumeParams,
-  buildControlledThreadStartParams,
   controlledLaunchOutcomeUnknown,
-  extractControlledThreadId,
   getControlledSocketPath,
+  getControlledVisibleSocketPath,
   isSameControlledLaunch,
   resolveControlledCodexCommand,
   startControlledCodexServer,
-  stopControlledCodexServer,
   type ControlledCodexCommand,
-  type ControlledCodexServer,
   type CodexControlledSessionLaunch
 } from './codex-controlled-session-launch'
 import {
   connectControlledCodexClient,
-  createControlledCodexSession,
   createReadyControlledTerminal,
+  assertControlledServerAlive,
   submitControlledInitialPrompt,
   toControlledSessionError,
   type ControlledCodexSession
 } from './codex-controlled-session-acquisition'
+import {
+  startControlledVisibleTransport,
+  type ControlledVisibleTransport
+} from './codex-controlled-visible-transport'
 import type {
   CodexControlledNewSessionLaunch,
   CodexControlledSessionIdentity,
@@ -35,24 +39,31 @@ export type { ControlledCodexSession } from './codex-controlled-session-acquisit
 export class CodexControlledSessionRegistry {
   private readonly sessions = new Map<string, ControlledCodexSession>()
   private readonly launches = new Map<string, Promise<unknown>>()
-  private readonly disposalFence = new CodexControlledSessionDisposalFence(
-    (conversationId) => this.launches.get(conversationId),
-    () => new Set([...this.sessions.keys(), ...this.launches.keys()]),
-    (conversationId) => this.disposeSession(conversationId)
-  )
+  private readonly lifecycle: CodexControlledSessionLifecycle
+  private readonly failedLaunches: CodexControlledFailedLaunchCleanupRegistry
+  private readonly cleanupCoordinator: CodexControlledSessionCleanupCoordinator
 
   constructor(
     private readonly options: CodexControlledSessionManagerOptions,
     private readonly socketRoot: () => string,
-    private readonly onNotification: (
+    onNotification: (
       session: ControlledCodexSession,
       method: string,
       params: Record<string, unknown>
     ) => void,
-    private readonly onMissing: (conversationId: string) => void,
+    onMissing: (conversationId: string) => void,
     private readonly assertCanSubmit: (session: ControlledCodexSession) => void,
     private readonly assertCanLaunch: (input: CodexControlledSessionLaunch) => void
-  ) {}
+  ) {
+    this.lifecycle = new CodexControlledSessionLifecycle(options, onNotification, onMissing)
+    this.failedLaunches = new CodexControlledFailedLaunchCleanupRegistry(this.lifecycle)
+    this.cleanupCoordinator = new CodexControlledSessionCleanupCoordinator(
+      this.sessions,
+      this.launches,
+      this.failedLaunches,
+      this.lifecycle
+    )
+  }
 
   get(conversationId: string): ControlledCodexSession | undefined {
     return this.sessions.get(conversationId)
@@ -73,6 +84,7 @@ export class CodexControlledSessionRegistry {
     input: CodexControlledSessionLaunch
   ): Promise<CodexControlledSessionLaunchResult> {
     const existing = this.sessions.get(input.conversationId)
+    this.assertNoFailedCleanup(input.conversationId)
     if (existing) {
       if (!isSameControlledLaunch(existing.launch, input)) {
         throw new Error('controlled Codex conversation identity mismatch')
@@ -80,12 +92,13 @@ export class CodexControlledSessionRegistry {
       if (existing.missing) {
         throw new Error('controlled Codex conversation requires cleanup before relaunch')
       }
-      existing.terminal = await this.refresh(existing)
+      existing.terminal = await this.lifecycle.refresh(existing)
       this.assertLaunchPermitted(existing.launch)
       return { identity: existing.terminal, disposition: 'reused', surface: 'visible' }
     }
     const command = resolveControlledCodexCommand(input.command)
-    const socketPath = getControlledSocketPath(this.socketRoot(), input.conversationId)
+    const socketRoot = this.socketRoot()
+    const socketPath = getControlledSocketPath(socketRoot, input.conversationId)
     const server = await startControlledCodexServer(
       input,
       socketPath,
@@ -94,29 +107,55 @@ export class CodexControlledSessionRegistry {
     )
     let client: CodexUnixAppServerClient | null = null
     let visibleIdentity: CodexControlledSessionIdentity | null = null
+    let visibleTransport: ControlledVisibleTransport | null = null
     try {
       this.assertLaunchPermitted(input)
       client = await connectControlledCodexClient(input, socketPath)
       this.assertLaunchPermitted(input)
       await client.request('thread/resume', buildControlledThreadResumeParams(input))
       this.assertLaunchPermitted(input)
+      visibleTransport = await startControlledVisibleTransport(
+        socketPath,
+        getControlledVisibleSocketPath(socketRoot, input.conversationId)
+      )
       visibleIdentity = await createReadyControlledTerminal(
         this.options,
         input,
-        socketPath,
+        visibleTransport,
         command,
         (created) => {
           visibleIdentity = created
-        }
+        },
+        server
       )
+      assertControlledServerAlive(server)
+      visibleTransport.assertLive()
       await assertControlledThreadAlive(client, input.threadId)
+      assertControlledServerAlive(server)
+      visibleTransport.assertLive()
       this.assertLaunchPermitted(input)
-      const session = this.createSession(input, socketPath, server, client, visibleIdentity)
+      const session = this.lifecycle.create(
+        input,
+        socketPath,
+        server,
+        visibleTransport,
+        client,
+        visibleIdentity
+      )
+      assertControlledServerAlive(server)
+      visibleTransport.assertLive()
       this.sessions.set(input.conversationId, session)
       return { identity: visibleIdentity, disposition: 'created', surface: 'visible' }
     } catch (error) {
       try {
-        await this.rollbackFailedLaunch(input, socketPath, server, client, visibleIdentity)
+        await this.failedLaunches.rollback(
+          input.conversationId,
+          socketPath,
+          server,
+          visibleTransport,
+          client,
+          visibleIdentity
+        )
       } catch (cleanupError) {
         Object.assign(toControlledSessionError(error), { cleanupError })
       }
@@ -139,17 +178,19 @@ export class CodexControlledSessionRegistry {
     command: ControlledCodexCommand
   ): Promise<CodexControlledSessionLaunchResult> {
     const existing = this.sessions.get(input.conversationId)
+    this.assertNoFailedCleanup(input.conversationId)
     if (existing) {
       this.assertNewLaunchMatches(existing.launch, input)
       if (existing.missing) {
         throw new Error('controlled Codex conversation requires cleanup before relaunch')
       }
-      existing.terminal = await this.refresh(existing)
+      existing.terminal = await this.lifecycle.refresh(existing)
       this.assertLaunchPermitted(existing.launch)
       await submitControlledInitialPrompt(existing, input, this.assertCanSubmit)
       return { identity: existing.terminal, disposition: 'reused', surface: 'visible' }
     }
-    const socketPath = getControlledSocketPath(this.socketRoot(), input.conversationId)
+    const socketRoot = this.socketRoot()
+    const socketPath = getControlledSocketPath(socketRoot, input.conversationId)
     const provisional = { ...input, threadId: 'pending' }
     const server = await startControlledCodexServer(
       provisional,
@@ -160,30 +201,52 @@ export class CodexControlledSessionRegistry {
     let client: CodexUnixAppServerClient | null = null
     let launch: CodexControlledSessionLaunch | null = null
     let identity: CodexControlledSessionIdentity | null = null
+    let visibleTransport: ControlledVisibleTransport | null = null
     let threadStartAttempted = false
     try {
       this.assertLaunchPermitted(provisional)
       client = await connectControlledCodexClient(provisional, socketPath)
       this.assertLaunchPermitted(provisional)
-      threadStartAttempted = true
-      const started = await client.request(
-        'thread/start',
-        buildControlledThreadStartParams(provisional)
-      )
-      launch = { ...input, threadId: extractControlledThreadId(started) }
-      this.assertLaunchPermitted(launch)
-      identity = await createReadyControlledTerminal(
-        this.options,
-        launch,
+      visibleTransport = await startControlledVisibleTransport(
         socketPath,
+        getControlledVisibleSocketPath(socketRoot, input.conversationId)
+      )
+      threadStartAttempted = true
+      const started = await createReadyControlledNewThreadTerminal(
+        this.options,
+        provisional,
+        visibleTransport,
         command,
         (created) => {
           identity = created
-        }
+        },
+        server,
+        client
       )
-      await assertControlledThreadAlive(client, launch.threadId)
+      identity = started.identity
+      launch = { ...input, threadId: started.threadId }
       this.assertLaunchPermitted(launch)
-      const session = this.createSession(launch, socketPath, server, client, identity)
+      assertControlledServerAlive(server)
+      visibleTransport.assertLive()
+      await assertControlledThreadAlive(client, launch.threadId)
+      try {
+        started.capture.assertExact(launch.threadId)
+      } finally {
+        started.capture.stop()
+      }
+      assertControlledServerAlive(server)
+      visibleTransport.assertLive()
+      this.assertLaunchPermitted(launch)
+      const session = this.lifecycle.create(
+        launch,
+        socketPath,
+        server,
+        visibleTransport,
+        client,
+        identity
+      )
+      assertControlledServerAlive(server)
+      visibleTransport.assertLive()
       this.sessions.set(input.conversationId, session)
       await submitControlledInitialPrompt(session, input, this.assertCanSubmit)
       return { identity, disposition: 'created', surface: 'visible' }
@@ -192,7 +255,14 @@ export class CodexControlledSessionRegistry {
         throw controlledLaunchOutcomeUnknown(error)
       }
       try {
-        await this.rollbackFailedLaunch(launch ?? provisional, socketPath, server, client, identity)
+        await this.failedLaunches.rollback(
+          input.conversationId,
+          socketPath,
+          server,
+          visibleTransport,
+          client,
+          identity
+        )
       } catch (cleanupError) {
         Object.assign(toControlledSessionError(error), { cleanupError })
       }
@@ -201,83 +271,19 @@ export class CodexControlledSessionRegistry {
   }
 
   async refresh(session: ControlledCodexSession): Promise<CodexControlledSessionIdentity> {
-    const current = await this.options.waitForVisibleTerminal(session.terminal)
-    if (
-      current.terminalPaneKey !== session.terminal.terminalPaneKey ||
-      current.worktreeId !== session.terminal.worktreeId ||
-      current.terminalPtyId !== session.terminal.terminalPtyId
-    ) {
-      throw new Error('controlled Codex terminal identity changed')
-    }
-    return current
+    return this.lifecycle.refresh(session)
   }
 
   async disposeConversation(conversationId: string): Promise<void> {
-    return this.disposalFence.disposeConversation(conversationId)
-  }
-
-  private async disposeSession(conversationId: string): Promise<void> {
-    const session = this.sessions.get(conversationId)
-    if (!session) {
-      return
-    }
-    session.missing = true
-    session.client.close()
-    if (!session.terminalClosed) {
-      await this.options.closeVisibleTerminal(session.terminal)
-      session.terminalClosed = true
-    }
-    await stopControlledCodexServer(session.server, session.socketPath)
-    this.sessions.delete(conversationId)
+    return this.cleanupCoordinator.disposeConversation(conversationId)
   }
 
   async dispose(): Promise<void> {
-    await this.disposalFence.dispose()
+    await this.cleanupCoordinator.dispose()
   }
 
   getConversationForPane(paneKey: string): string | null {
-    for (const session of this.sessions.values()) {
-      if (session.terminal.terminalPaneKey === paneKey && !session.missing) {
-        return session.launch.conversationId
-      }
-    }
-    return null
-  }
-
-  private async rollbackFailedLaunch(
-    launch: CodexControlledSessionLaunch,
-    socketPath: string,
-    server: ControlledCodexServer,
-    client: CodexUnixAppServerClient | null,
-    terminal: CodexControlledSessionIdentity | null
-  ): Promise<void> {
-    if (!client || !terminal) {
-      client?.close()
-      await stopControlledCodexServer(server, socketPath)
-      return
-    }
-    const session = this.createSession(launch, socketPath, server, client, terminal)
-    this.sessions.set(launch.conversationId, session)
-    await this.disposeSession(launch.conversationId)
-  }
-
-  private createSession(
-    launch: CodexControlledSessionLaunch,
-    socketPath: string,
-    server: ControlledCodexServer,
-    client: CodexUnixAppServerClient,
-    terminal: CodexControlledSessionIdentity
-  ): ControlledCodexSession {
-    return createControlledCodexSession({
-      options: this.options,
-      launch,
-      socketPath,
-      server,
-      client,
-      terminal,
-      onNotification: this.onNotification,
-      onMissing: this.onMissing
-    })
+    return this.cleanupCoordinator.getConversationForPane(paneKey)
   }
 
   private assertNewLaunchMatches(
@@ -295,6 +301,12 @@ export class CodexControlledSessionRegistry {
   }
 
   private assertNotDisposing(conversationId: string): void {
-    this.disposalFence.assertNotDisposing(conversationId)
+    this.cleanupCoordinator.assertNotDisposing(conversationId)
+  }
+
+  private assertNoFailedCleanup(conversationId: string): void {
+    if (this.failedLaunches.has(conversationId)) {
+      throw new Error('controlled Codex conversation requires cleanup before relaunch')
+    }
   }
 }

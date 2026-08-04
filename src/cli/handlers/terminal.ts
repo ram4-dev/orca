@@ -12,7 +12,10 @@ import type {
   RuntimeTerminalWait
 } from '../../shared/runtime-types'
 import type { CommandHandler } from '../dispatch'
-import { shouldUseRendererBackedInteractiveTerminal } from '../codex-command-classification'
+import {
+  shouldUseRendererBackedCodexTerminal,
+  shouldUseRendererBackedInteractiveTerminal
+} from '../codex-command-classification'
 import {
   formatTerminalClose,
   formatTerminalCreate,
@@ -153,6 +156,7 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
       assertControlledCodexCoordinatorFlags(flags)
     }
     const command = getOptionalStringFlag(flags, 'command')
+    const codexLaunch = shouldUseRendererBackedCodexTerminal(command)
     const useRendererBackedInteractiveTerminal =
       !client.isRemote && shouldUseRendererBackedInteractiveTerminal(command)
     const focus = flags.get('focus') === true
@@ -174,6 +178,7 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
     const result = await client.call<{ terminal: RuntimeTerminalCreate }>('terminal.create', {
       worktree,
       command,
+      ...(codexLaunch ? { launchAgent: 'codex' } : {}),
       title: getOptionalStringFlag(flags, 'title'),
       // Why: interactive local agent TUIs need the renderer-backed terminal
       // path for browser-side features, but CLI creates must stay backgrounded

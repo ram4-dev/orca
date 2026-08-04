@@ -121,7 +121,10 @@ import {
 } from './orchestration/setup-completion-signal'
 import type { RuntimeOrchestrationEnvelope } from '../../shared/runtime-rpc-envelope'
 import { ORCHESTRATION_MESSAGE_WAIT_DEFAULT_TIMEOUT_MS } from '../../shared/orchestration-message-wait-timeout'
-import type { TerminalRevealIdentity } from '../../shared/terminal-reveal-identity'
+import type {
+  TerminalRevealIdentity,
+  TerminalTabCreateReply
+} from '../../shared/terminal-reveal-identity'
 import type {
   OrchestrationCompatibilityEvidence,
   OrchestrationCompatibilityHostStamp
@@ -659,9 +662,14 @@ import {
   resolveLocalProjectRuntimeForRepo,
   resolveLocalProjectRuntimesForRepos
 } from '../project-runtime-git-options'
+import { ensureControlledTerminalPtyStopped } from '../codex/codex-controlled-terminal-pty-stop'
 import { resolveLocalProjectRuntimeForWorktreeId } from '../local-project-runtime-resolution'
 import type { ProjectExecutionRuntimeResolution } from '../../shared/project-execution-runtime'
-import { resolveTerminalOrchestrationCliCommand } from './orchestration/cli-command'
+import {
+  resolveLocalOrchestrationCliCommand,
+  resolveTerminalOrchestrationCliCommand,
+  resolveUnidentifiedTerminalOrchestrationCliCommand
+} from './orchestration/cli-command'
 import {
   getLocalWorktreePathAccess,
   removeLocalWorktreePath,
@@ -11962,24 +11970,32 @@ export class OrcaRuntimeService {
       : undefined
   }
 
-  getTerminalOrchestrationCliCommand(handle: string): 'orca' | 'orca-ide' {
+  getTerminalOrchestrationCliCommand(handle: string): string {
     let pty: RuntimePtyWorktreeRecord | null = null
     try {
       const ptyId = this.resolveLeafForHandle(handle)?.ptyId
       pty = ptyId ? (this.ptysById.get(ptyId) ?? null) : null
     } catch {
-      return 'orca'
+      return resolveUnidentifiedTerminalOrchestrationCliCommand()
     }
     if (!pty) {
-      return 'orca'
+      return resolveUnidentifiedTerminalOrchestrationCliCommand()
     }
-    return resolveTerminalOrchestrationCliCommand({
+    const placement = {
       connectionId: pty.connectionId,
       isWsl: pty.isWsl,
       worktreeId: pty.worktreeId,
       projectRuntime: this.store
         ? resolveLocalProjectRuntimeForWorktreeId(this.requireStore(), pty.worktreeId)
         : undefined
+    }
+    const hostCommand = resolveTerminalOrchestrationCliCommand(placement)
+    if (pty.connectionId || hostCommand === 'orca-ide') {
+      return hostCommand
+    }
+    return resolveTerminalOrchestrationCliCommand({
+      ...placement,
+      localCommand: resolveLocalOrchestrationCliCommand()
     })
   }
 
@@ -16079,7 +16095,8 @@ export class OrcaRuntimeService {
     const ptyId = this.getTerminalAgentStatusPtyId(handle)
     const terminal = this.getTerminalAgentStatusSnapshot(handle, ptyId)
     const explicitStatus = this.getFreshExplicitAgentStatusForHandle(handle)
-    const blockedByWaitText = detectTerminalWaitBlockedReason(terminal.waitText)
+    const allowCodexComposer = this.ptyAllowsCodexComposerReadiness(ptyId)
+    const blockedByWaitText = detectTerminalWaitBlockedReason(terminal.waitText, allowCodexComposer)
     const liveTitleClearsBlockedText =
       terminal.titleStatusIsLive &&
       terminal.titleStatus !== null &&
@@ -16557,7 +16574,8 @@ export class OrcaRuntimeService {
         pty.pty.tailPartialLine,
         pty.pty.preview
       )
-      const ptyBlockedReason = detectTerminalWaitBlockedReason(ptyWaitText)
+      const allowCodexComposer = pty.pty.launchAgent === 'codex'
+      const ptyBlockedReason = detectTerminalWaitBlockedReason(ptyWaitText, allowCodexComposer)
       if (condition === 'tui-idle' && ptyBlockedReason) {
         return buildPtyTerminalWaitBlockedResult(handle, condition, pty.pty, ptyBlockedReason)
       }
@@ -16567,7 +16585,7 @@ export class OrcaRuntimeService {
       if (
         condition === 'tui-idle' &&
         (this.getAdoptedPtyExplicitIdleStatus(pty.pty) === 'idle' ||
-          isKnownReadyPromptPreview(ptyWaitText))
+          isKnownReadyPromptPreview(ptyWaitText, allowCodexComposer))
       ) {
         return buildPtyTerminalWaitResult(handle, condition, pty.pty)
       }
@@ -16615,7 +16633,11 @@ export class OrcaRuntimeService {
             live.pty.tailPartialLine,
             live.pty.preview
           )
-          const blockedReason = detectTerminalWaitBlockedReason(livePtyWaitText)
+          const liveAllowsCodexComposer = live.pty.launchAgent === 'codex'
+          const blockedReason = detectTerminalWaitBlockedReason(
+            livePtyWaitText,
+            liveAllowsCodexComposer
+          )
           if (blockedReason) {
             this.resolveWaiter(
               waiter,
@@ -16625,7 +16647,7 @@ export class OrcaRuntimeService {
             this.resolveWaiter(waiter, buildPtyTerminalWaitResult(handle, condition, live.pty))
           } else if (
             this.getAdoptedPtyExplicitIdleStatus(live.pty) === 'idle' ||
-            isKnownReadyPromptPreview(livePtyWaitText)
+            isKnownReadyPromptPreview(livePtyWaitText, liveAllowsCodexComposer)
           ) {
             this.resolveWaiter(waiter, buildPtyTerminalWaitResult(handle, condition, live.pty))
           } else {
@@ -16641,7 +16663,8 @@ export class OrcaRuntimeService {
     }
 
     const leafWaitText = buildTerminalWaitText(leaf.tailBuffer, leaf.tailPartialLine, leaf.preview)
-    const leafBlockedReason = detectTerminalWaitBlockedReason(leafWaitText)
+    const allowCodexComposer = this.leafAllowsCodexComposerReadiness(leaf)
+    const leafBlockedReason = detectTerminalWaitBlockedReason(leafWaitText, allowCodexComposer)
     if (condition === 'tui-idle' && leafBlockedReason) {
       return buildTerminalWaitBlockedResult(handle, condition, leaf, leafBlockedReason)
     }
@@ -16658,7 +16681,7 @@ export class OrcaRuntimeService {
       const fastPathTitle = leaf.paneTitle ?? this.tabs.get(leaf.tabId)?.title
       if (
         (fastPathTitle && detectExplicitIdleStatusFromTitle(fastPathTitle) === 'idle') ||
-        isKnownReadyPromptPreview(leafWaitText)
+        isKnownReadyPromptPreview(leafWaitText, allowCodexComposer)
       ) {
         return buildTerminalWaitResult(handle, condition, leaf)
       }
@@ -16717,7 +16740,11 @@ export class OrcaRuntimeService {
             live.leaf.tailPartialLine,
             live.leaf.preview
           )
-          const blockedReason = detectTerminalWaitBlockedReason(liveLeafWaitText)
+          const liveAllowsCodexComposer = this.leafAllowsCodexComposerReadiness(live.leaf)
+          const blockedReason = detectTerminalWaitBlockedReason(
+            liveLeafWaitText,
+            liveAllowsCodexComposer
+          )
           if (blockedReason) {
             this.resolveWaiter(
               waiter,
@@ -16736,7 +16763,7 @@ export class OrcaRuntimeService {
             const fastPathTitle = live.leaf.paneTitle ?? this.tabs.get(live.leaf.tabId)?.title
             if (
               (fastPathTitle && detectExplicitIdleStatusFromTitle(fastPathTitle) === 'idle') ||
-              isKnownReadyPromptPreview(liveLeafWaitText)
+              isKnownReadyPromptPreview(liveLeafWaitText, liveAllowsCodexComposer)
             ) {
               this.resolveWaiter(waiter, buildTerminalWaitResult(handle, condition, live.leaf))
             } else {
@@ -24820,72 +24847,97 @@ export class OrcaRuntimeService {
       ? this.resolveWorkspaceTerminalStartupCwd(workspace, launchOpts.cwd)
       : launchOpts.cwd
     const requestId = randomUUID()
-
-    // Why: terminal creation is a renderer-side Zustand store operation (like
-    // browser tab creation). The main process sends a request, the renderer
-    // creates the tab and replies with the tabId so we can resolve the handle.
-    const reply = await new Promise<{ tabId: string; title: string }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        ipcMain.removeListener('terminal:tabCreateReply', handler)
-        reject(new Error('Terminal creation timed out'))
-      }, 10_000)
-
-      const handler = (
-        event: Electron.IpcMainEvent,
-        r: { requestId: string; tabId?: string; title?: string; error?: string }
-      ): void => {
-        if (event.sender !== win.webContents || r.requestId !== requestId) {
-          return
-        }
-        clearTimeout(timer)
-        ipcMain.removeListener('terminal:tabCreateReply', handler)
-        if (r.error) {
-          reject(new Error(r.error))
-        } else {
-          resolve({ tabId: r.tabId!, title: r.title ?? launchOpts.title ?? '' })
+    const requestedTabId = randomUUID()
+    let rendererCreateSettled = false
+    const settleRendererCreate = (accepted: boolean): void => {
+      if (rendererCreateSettled) {
+        return
+      }
+      rendererCreateSettled = true
+      if (!win.webContents.isDestroyed?.()) {
+        try {
+          win.webContents.send('terminal:settleTabCreate', { requestId, accepted })
+        } catch {
+          // The renderer is already unreachable, so no live tab remains to settle.
         }
       }
-      ipcMain.on('terminal:tabCreateReply', handler)
-      win.webContents.send('terminal:requestTabCreate', {
-        requestId,
-        worktreeId,
-        command: launchOpts.command,
-        cwd,
-        ...(launchOpts.env ? { env: launchOpts.env } : {}),
-        ...(launchOpts.launchConfig ? { launchConfig: launchOpts.launchConfig } : {}),
-        ...(launchOpts.resumeProviderSession
-          ? { resumeProviderSession: launchOpts.resumeProviderSession }
-          : {}),
-        ...(launchOpts.launchToken ? { launchToken: launchOpts.launchToken } : {}),
-        ...(launchOpts.launchAgent ? { launchAgent: launchOpts.launchAgent } : {}),
-        ...(launchOpts.viewMode ? { viewMode: launchOpts.viewMode } : {}),
-        startupCommandDelivery: launchOpts.startupCommandDelivery,
-        title: launchOpts.title,
-        activate: presentation === 'focused',
-        ...(presentation ? { presentation } : {}),
-        ...ownerSurfacing(opts.surfaceOwner !== false)
-      })
-    })
-
-    // Why: the renderer created the tab immediately, but the graph sync that
-    // populates this.leaves may not have arrived yet. Wait for the leaf to
-    // appear so we can return a valid handle the caller can use right away.
-    const handle = await this.waitForTerminalHandle(reply.tabId)
-    const record = this.handles.get(handle)
-    const leaf = record ? this.leaves.get(this.getLeafKey(record.tabId, record.leafId)) : null
-    if (!leaf?.ptyId) {
-      this.notifier?.closeTerminal(reply.tabId)
-      throw new Error('renderer-backed terminal did not register a PTY identity')
     }
-    return {
-      handle,
-      tabId: reply.tabId,
-      paneKey: this.makeRuntimePaneKey(leaf),
-      ptyId: leaf.ptyId,
-      worktreeId: leaf.worktreeId,
-      title: reply.title,
-      ...this.getPtyExecutionHostMetadata(leaf.ptyId),
-      surface: 'visible'
+
+    try {
+      // Why: acknowledgement is readiness evidence only after the live pane identity crosses the graph IPC boundary into main.
+      const reply = await new Promise<TerminalTabCreateReply>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          ipcMain.removeListener('terminal:tabCreateReply', handler)
+          settleRendererCreate(false)
+          reject(new Error('Terminal creation timed out'))
+        }, 10_000)
+
+        const handler = (event: Electron.IpcMainEvent, r: TerminalTabCreateReply): void => {
+          if (event.sender !== win.webContents || r.requestId !== requestId) {
+            return
+          }
+          clearTimeout(timer)
+          ipcMain.removeListener('terminal:tabCreateReply', handler)
+          if (r.error) {
+            settleRendererCreate(false)
+            reject(new Error(r.error))
+          } else {
+            resolve(r)
+          }
+        }
+        ipcMain.on('terminal:tabCreateReply', handler)
+        win.webContents.send('terminal:requestTabCreate', {
+          requestId,
+          worktreeId,
+          tabId: requestedTabId,
+          requireRegisteredIdentity: true,
+          command: launchOpts.command,
+          cwd,
+          ...(launchOpts.env ? { env: launchOpts.env } : {}),
+          ...(launchOpts.launchConfig ? { launchConfig: launchOpts.launchConfig } : {}),
+          ...(launchOpts.resumeProviderSession
+            ? { resumeProviderSession: launchOpts.resumeProviderSession }
+            : {}),
+          ...(launchOpts.launchToken ? { launchToken: launchOpts.launchToken } : {}),
+          ...(launchOpts.launchAgent ? { launchAgent: launchOpts.launchAgent } : {}),
+          ...(launchOpts.viewMode ? { viewMode: launchOpts.viewMode } : {}),
+          startupCommandDelivery: launchOpts.startupCommandDelivery,
+          title: launchOpts.title,
+          activate: presentation === 'focused',
+          ...(presentation ? { presentation } : {}),
+          ...ownerSurfacing(opts.surfaceOwner !== false)
+        })
+      })
+      const identity = reply.identity
+      const leaf = identity
+        ? this.leaves.get(this.getLeafKey(identity.tabId, identity.leafId))
+        : null
+      if (
+        reply.tabId !== requestedTabId ||
+        !identity ||
+        identity.tabId !== requestedTabId ||
+        (worktreeId !== undefined && identity.worktreeId !== worktreeId) ||
+        !leaf?.ptyId ||
+        leaf.worktreeId !== identity.worktreeId ||
+        leaf.ptyId !== identity.ptyId
+      ) {
+        settleRendererCreate(false)
+        throw new Error('renderer-backed terminal did not register a PTY identity')
+      }
+      settleRendererCreate(true)
+      return {
+        handle: this.issueHandle(leaf),
+        tabId: reply.tabId,
+        paneKey: this.makeRuntimePaneKey(leaf),
+        ptyId: leaf.ptyId,
+        worktreeId: leaf.worktreeId,
+        title: reply.title ?? launchOpts.title ?? '',
+        ...this.getPtyExecutionHostMetadata(leaf.ptyId),
+        surface: 'visible'
+      }
+    } catch (error) {
+      settleRendererCreate(false)
+      throw error
     }
   }
 
@@ -25798,38 +25850,6 @@ export class OrcaRuntimeService {
     )
   }
 
-  private waitForTerminalHandle(tabId: string, timeoutMs = 10_000): Promise<string> {
-    const existing = this.resolveHandleForTab(tabId)
-    if (existing) {
-      return Promise.resolve(existing)
-    }
-
-    return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = this.graphSyncCallbacks.indexOf(check)
-        if (idx !== -1) {
-          this.graphSyncCallbacks.splice(idx, 1)
-        }
-        reject(new Error('Timed out waiting for terminal handle after creation'))
-      }, timeoutMs)
-
-      const check = (): void => {
-        const handle = this.resolveHandleForTab(tabId)
-        if (handle) {
-          clearTimeout(timer)
-          const idx = this.graphSyncCallbacks.indexOf(check)
-          if (idx !== -1) {
-            this.graphSyncCallbacks.splice(idx, 1)
-          }
-          resolve(handle)
-        }
-      }
-      this.graphSyncCallbacks.push(check)
-      // Why: graph sync may have fired between the initial check and registration; re-check to avoid a missed wake-up.
-      check()
-    })
-  }
-
   // Why: mobile may subscribe before the PTY spawns; wait for it so subscribe proceeds with phone-fit instead of a bare scrollback+end.
   waitForLeafPtyId(handle: string, timeoutMs = 10_000, signal?: AbortSignal): Promise<string> {
     const leaf = this.resolveLeafForHandle(handle)
@@ -25979,15 +25999,6 @@ export class OrcaRuntimeService {
     return count
   }
 
-  private resolveHandleForTab(tabId: string): string | null {
-    for (const leaf of this.leaves.values()) {
-      if (leaf.tabId === tabId && leaf.ptyId !== null) {
-        return this.issueHandle(leaf)
-      }
-    }
-    return null
-  }
-
   async focusTerminal(
     handle: string,
     options: { navigateHost?: boolean } = {}
@@ -26070,6 +26081,10 @@ export class OrcaRuntimeService {
       this.notifier?.closeTerminal(leaf.tabId, leaf.paneRuntimeId)
     }
     return { handle, tabId: leaf.tabId, ptyKilled }
+  }
+
+  async ensureTerminalPtyStopped(ptyId: string): Promise<void> {
+    await ensureControlledTerminalPtyStopped(this.ptyController, ptyId)
   }
 
   async closeTerminalTab(handle: string): Promise<RuntimeTerminalClose> {
@@ -29974,7 +29989,7 @@ export class OrcaRuntimeService {
         return true
       }
       const waitText = buildTerminalWaitText(leaf.tailBuffer, leaf.tailPartialLine, leaf.preview)
-      if (isKnownReadyPromptPreview(waitText)) {
+      if (isKnownReadyPromptPreview(waitText, this.leafAllowsCodexComposerReadiness(leaf))) {
         return true
       }
       const hasCurrentTitleEvidence = paneTitle !== null || tabTitle !== null
@@ -30030,7 +30045,7 @@ export class OrcaRuntimeService {
       updatedAt: pty.managementTitleAt
     })
     const waitText = buildTerminalWaitText(pty.tailBuffer, pty.tailPartialLine, pty.preview)
-    if (isKnownReadyPromptPreview(waitText)) {
+    if (isKnownReadyPromptPreview(waitText, pty.launchAgent === 'codex')) {
       return true
     }
     // Why: stale status is a fallback only when no current title evidence exists; neutral titles (shells) clear it.
@@ -30581,7 +30596,8 @@ export class OrcaRuntimeService {
           leaf.tailPartialLine,
           leaf.preview
         )
-        const blockedReason = detectTerminalWaitBlockedReason(leafWaitText)
+        const allowCodexComposer = this.leafAllowsCodexComposerReadiness(leaf)
+        const blockedReason = detectTerminalWaitBlockedReason(leafWaitText, allowCodexComposer)
         if (blockedReason) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
@@ -30593,7 +30609,7 @@ export class OrcaRuntimeService {
           )
           return
         }
-        if (isKnownReadyPromptPreview(leafWaitText)) {
+        if (isKnownReadyPromptPreview(leafWaitText, allowCodexComposer)) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
             waiter.pollInterval = null
@@ -30649,7 +30665,8 @@ export class OrcaRuntimeService {
           return
         }
         const ptyWaitText = buildTerminalWaitText(pty.tailBuffer, pty.tailPartialLine, pty.preview)
-        const blockedReason = detectTerminalWaitBlockedReason(ptyWaitText)
+        const allowCodexComposer = pty.launchAgent === 'codex'
+        const blockedReason = detectTerminalWaitBlockedReason(ptyWaitText, allowCodexComposer)
         if (blockedReason) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
@@ -30664,7 +30681,7 @@ export class OrcaRuntimeService {
         // Why: adopted background PTY handles use their live xterm title as the same readiness signal as leaf handles.
         if (
           this.getAdoptedPtyExplicitIdleStatus(pty) === 'idle' ||
-          isKnownReadyPromptPreview(ptyWaitText)
+          isKnownReadyPromptPreview(ptyWaitText, allowCodexComposer)
         ) {
           if (waiter.pollInterval) {
             clearInterval(waiter.pollInterval)
@@ -30713,6 +30730,14 @@ export class OrcaRuntimeService {
       }
     }
     return null
+  }
+
+  private leafAllowsCodexComposerReadiness(leaf: RuntimeLeafRecord): boolean {
+    return leaf.ptyId !== null && this.ptyAllowsCodexComposerReadiness(leaf.ptyId)
+  }
+
+  private ptyAllowsCodexComposerReadiness(ptyId: string): boolean {
+    return this.ptysById.get(ptyId)?.launchAgent === 'codex'
   }
 
   // Why: push-on-idle delivery is event-driven (no polling) because the runtime owns both the message store and terminal status detection.
@@ -35224,9 +35249,9 @@ function detectExplicitIdleStatusFromTitle(title: string): AgentStatus | null {
   return null
 }
 
-function isKnownReadyPromptPreview(preview: string): boolean {
+function isKnownReadyPromptPreview(preview: string, allowCodexComposer = false): boolean {
   const normalized = preview.toLowerCase()
-  const readyIndex = findKnownReadyPromptIndex(normalized)
+  const readyIndex = findKnownReadyPromptIndex(normalized, allowCodexComposer)
   if (readyIndex === null) {
     return false
   }
@@ -35237,19 +35262,23 @@ function isKnownReadyPromptPreview(preview: string): boolean {
   return true
 }
 
-function detectTerminalWaitBlockedReason(preview: string): RuntimeTerminalWaitBlockedReason | null {
+function detectTerminalWaitBlockedReason(
+  preview: string,
+  allowCodexComposer = false
+): RuntimeTerminalWaitBlockedReason | null {
   const normalized = preview.toLowerCase()
-  return findActionableTerminalWaitBlockedSignal(normalized)?.reason ?? null
+  return findActionableTerminalWaitBlockedSignal(normalized, allowCodexComposer)?.reason ?? null
 }
 
 function findActionableTerminalWaitBlockedSignal(
-  normalized: string
+  normalized: string,
+  allowCodexComposer = false
 ): { reason: RuntimeTerminalWaitBlockedReason; index: number } | null {
   const blockedSignal = findTerminalWaitBlockedSignal(normalized)
   if (blockedSignal === null) {
     return null
   }
-  const dismissedModalIndex = findDismissedStartupModalIndex(normalized)
+  const dismissedModalIndex = findDismissedStartupModalIndex(normalized, allowCodexComposer)
   // Why: a live prompt after the modal means it was dismissed → signal no longer actionable, even mid-run (Cursor never reports idle via OSC title).
   return dismissedModalIndex !== null && dismissedModalIndex > blockedSignal.index
     ? null
@@ -35257,18 +35286,21 @@ function findActionableTerminalWaitBlockedSignal(
 }
 
 // Why: a live prompt (idle OR busy) proves the startup modal was dismissed, so a mid-run Cursor lane stops reporting stale trust hits.
-function findDismissedStartupModalIndex(normalized: string): number | null {
+function findDismissedStartupModalIndex(
+  normalized: string,
+  allowCodexComposer = false
+): number | null {
   const indexes = [
-    findCodexReadyPromptIndex(normalized),
+    findCodexReadyPromptIndex(normalized, allowCodexComposer),
     findAntigravityReadyPromptIndex(normalized),
     findCursorActivePromptIndex(normalized)
   ].filter((index): index is number => index !== null)
   return indexes.length > 0 ? Math.max(...indexes) : null
 }
 
-function findKnownReadyPromptIndex(normalized: string): number | null {
+function findKnownReadyPromptIndex(normalized: string, allowCodexComposer = false): number | null {
   const indexes = [
-    findCodexReadyPromptIndex(normalized),
+    findCodexReadyPromptIndex(normalized, allowCodexComposer),
     findAntigravityReadyPromptIndex(normalized),
     findCursorReadyPromptIndex(normalized)
   ].filter((index): index is number => index !== null)
@@ -35295,14 +35327,38 @@ function findCursorReadyPromptIndex(normalized: string): number | null {
   return CURSOR_BUSY_SPINNER_RE.test(normalized.slice(activeIndex)) ? null : activeIndex
 }
 
-function findCodexReadyPromptIndex(normalized: string): number | null {
+function findCodexReadyPromptIndex(normalized: string, allowCodexComposer = false): number | null {
+  const composerIndex = allowCodexComposer ? findCodexComposerReadyPromptIndex(normalized) : null
   const headerIndex = normalized.lastIndexOf('openai codex')
   if (headerIndex === -1) {
-    return null
+    return composerIndex
   }
   const readySegment = normalized.slice(headerIndex)
   // Why: Codex prints permissions only in YOLO mode; the stable ready header is OpenAI Codex + model + directory.
-  return readySegment.includes('model:') && readySegment.includes('directory:') ? headerIndex : null
+  const legacyIndex =
+    readySegment.includes('model:') && readySegment.includes('directory:') ? headerIndex : null
+  return composerIndex !== null && (legacyIndex === null || composerIndex > legacyIndex)
+    ? composerIndex
+    : legacyIndex
+}
+
+function findCodexComposerReadyPromptIndex(normalized: string): number | null {
+  // Why: Codex >=0.145 replaced the legacy header with a composer plus model/path footer.
+  const composerLine = /(?:^|\n)[ \t]*›[^\n]*/g
+  let readyIndex: number | null = null
+  for (const match of normalized.matchAll(composerLine)) {
+    const promptIndex = match.index + (match[0].startsWith('\n') ? 1 : 0)
+    const followingLines = normalized.slice(promptIndex).split('\n', 5)
+    if (followingLines.slice(1).some(isCodexComposerFooterLine)) {
+      readyIndex = promptIndex
+    }
+  }
+  return readyIndex
+}
+
+function isCodexComposerFooterLine(line: string): boolean {
+  const footer = /^\s*(\S(?:.*?\S)?)\s[·•]\s(.+)$/.exec(line)
+  return footer ? /(?:^|\s)(?:~[\\/]|[a-z]:[\\/]|\/)/i.test(footer[2]!) : false
 }
 
 function findAntigravityReadyPromptIndex(normalized: string): number | null {

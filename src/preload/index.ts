@@ -129,6 +129,7 @@ import type {
   RuntimeSyncWindowGraphResult,
   RuntimeSyncWindowGraph,
   RuntimeTerminalCreateRequestPayload,
+  RuntimeTerminalCreateSettlementPayload,
   RuntimeTerminalDriverState,
   RuntimeTerminalPresentation
 } from '../shared/runtime-types'
@@ -3766,6 +3767,16 @@ const api = {
       ) => callback(data)
       ipcRenderer.on('terminal:requestTabCreate', listener)
       return () => ipcRenderer.removeListener('terminal:requestTabCreate', listener)
+    },
+    onSettleTerminalCreate: (
+      callback: (data: RuntimeTerminalCreateSettlementPayload) => void
+    ): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        data: RuntimeTerminalCreateSettlementPayload
+      ) => callback(data)
+      ipcRenderer.on('terminal:settleTabCreate', listener)
+      return () => ipcRenderer.removeListener('terminal:settleTabCreate', listener)
     },
     onRequestTerminalTabMount: (
       callback: (data: { worktreeId: string; tabId?: string; ptyId?: string }) => void

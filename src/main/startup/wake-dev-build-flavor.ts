@@ -11,9 +11,15 @@ type PathName = 'userData' | 'sessionData' | 'logs' | 'crashDumps' | 'temp'
 
 let configuredWakeDevBuild = false
 
-export function configureWakeDevBuildFlavor(app: App, enabled: boolean): void {
+export function configureWakeDevBuildFlavor(
+  app: App,
+  enabled: boolean,
+  resourcesPath = process.resourcesPath
+): void {
   configuredWakeDevBuild = enabled
   if (!enabled) {
+    delete process.env.ORCA_PACKAGED_COMMAND_NAME
+    delete process.env.ORCA_PACKAGED_CLI_BIN_PATH
     return
   }
 
@@ -30,7 +36,13 @@ export function configureWakeDevBuildFlavor(app: App, enabled: boolean): void {
     app.setPath(name, path)
   }
 
-  process.env.ORCA_PACKAGED_COMMAND_NAME = WAKE_DEV_CLI_COMMAND
+  if (app.isPackaged) {
+    process.env.ORCA_PACKAGED_COMMAND_NAME = WAKE_DEV_CLI_COMMAND
+    process.env.ORCA_PACKAGED_CLI_BIN_PATH = join(resourcesPath, 'bin', WAKE_DEV_CLI_COMMAND)
+  } else {
+    delete process.env.ORCA_PACKAGED_COMMAND_NAME
+    delete process.env.ORCA_PACKAGED_CLI_BIN_PATH
+  }
   process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT = join(
     '/tmp',
     `ocw-wake-${process.getuid?.() ?? 'local'}`

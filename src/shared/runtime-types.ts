@@ -612,6 +612,8 @@ export type RuntimeTerminalPresentation = 'background' | 'focused'
 type RuntimeTerminalCreateBaseRequestPayload = {
   requestId: string
   worktreeId?: string
+  tabId?: string
+  requireRegisteredIdentity?: true
   afterTabId?: string
   targetGroupId?: string
   command?: string
@@ -644,6 +646,11 @@ export type RuntimeTerminalCreateRequestPayload =
       // active-runtime local terminal guard; ordinary UI requests must omit this.
       source: 'runtime-session'
     })
+
+export type RuntimeTerminalCreateSettlementPayload = {
+  requestId: string
+  accepted: boolean
+}
 
 export type RuntimeTerminalCreate = {
   handle: string

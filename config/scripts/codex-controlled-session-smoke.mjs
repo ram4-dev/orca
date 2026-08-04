@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { promisify } from 'node:util'
 import WebSocket from 'ws'
+import { formatOrcaJsonFailure } from './codex-controlled-session-smoke-cli-error.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -368,15 +369,7 @@ async function orcaJson(args) {
   } catch (error) {
     const command = ['orca', ...args.slice(0, 2)].join(' ')
     const stdout = typeof error?.stdout === 'string' ? error.stdout : ''
-    let parsed
-    try {
-      parsed = JSON.parse(stdout)
-    } catch {}
-    const detail = parsed?.error ?? parsed
-    if (typeof detail?.code === 'string' && typeof detail?.message === 'string') {
-      throw new Error(`${command} failed: ${detail.code}: ${detail.message}`)
-    }
-    throw new Error(`${command} failed without a structured error`)
+    throw new Error(formatOrcaJsonFailure(command, stdout))
   }
 }
 

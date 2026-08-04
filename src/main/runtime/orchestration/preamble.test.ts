@@ -193,6 +193,24 @@ describe('buildDispatchPreamble', () => {
     expect(result).not.toMatch(/(^|\s)orca orchestration/m)
   })
 
+  it('uses the exact Wake Dev command for branded packaged workers', () => {
+    const result = buildDispatchPreamble(baseParams({ cliCommand: 'orca-wake' }))
+
+    expect(result).toContain('orca-wake orchestration send')
+    expect(result).toContain('orca-wake orchestration check')
+    expect(result).toContain('orca-wake orchestration ask')
+    expect(result).not.toMatch(/(^|\s)orca orchestration/m)
+  })
+
+  it('shell-quotes an absolute packaged CLI path in every worker command', () => {
+    const executable = '/Applications/Orca Wake Dev.app/Contents/Resources/bin/orca-wake'
+    const result = buildDispatchPreamble(baseParams({ cliCommand: executable }))
+
+    expect(result).toContain(`'${executable}' orchestration send`)
+    expect(result).toContain(`'${executable}' orchestration check`)
+    expect(result).not.toContain('\n  orca orchestration')
+  })
+
   it('appends a BASE DRIFT section when baseDrift.behind > 0', () => {
     const result = buildDispatchPreamble({
       taskId: 'task_x',
