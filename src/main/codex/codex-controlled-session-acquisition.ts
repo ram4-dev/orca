@@ -62,15 +62,19 @@ export async function createReadyControlledTerminal(
   visibleTransport: ControlledVisibleTransport,
   command: ControlledCodexCommand,
   onCreated: (identity: CodexControlledSessionIdentity) => void,
-  server: ControlledCodexServer
+  server: ControlledCodexServer,
+  visibleLaunch?: { command: string; resumeThreadId: string | null }
 ): Promise<CodexControlledSessionIdentity> {
   const terminal = await options.createVisibleTerminal({
     worktreeSelector: input.worktreeSelector,
-    command: buildControlledVisibleResumeCommand(input, visibleTransport.socketPath, command),
+    command:
+      visibleLaunch?.command ??
+      buildControlledVisibleResumeCommand(input, visibleTransport.socketPath, command),
     cwd: input.cwd,
     env: { CODEX_HOME: input.codexHome },
+    viewMode: 'terminal',
     conversationId: input.conversationId,
-    threadId: input.threadId
+    threadId: visibleLaunch ? visibleLaunch.resumeThreadId : input.threadId
   })
   const cleanupIdentity: CodexControlledSessionIdentity = {
     conversationId: input.conversationId,

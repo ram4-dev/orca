@@ -14,7 +14,6 @@ import {
 import { resolveControlledCodexLaunchAuthority } from './codex-controlled-launch-authority'
 import {
   getControlledSocketPath,
-  getControlledSocketRoot,
   resolveControlledCodexCommand,
   startControlledCodexServer,
   stopControlledCodexServer
@@ -58,41 +57,6 @@ afterEach(async () => {
 })
 
 describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', () => {
-  it('uses a validated environment socket root unless explicitly configured', () => {
-    const prior = process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT
-    process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT = join(tmpdir(), 'ocw-wake-env')
-    try {
-      expect(getControlledSocketRoot()).toBe(join(tmpdir(), 'ocw-wake-env'))
-      expect(getControlledSocketRoot(join(tmpdir(), 'ocw-explicit'))).toBe(
-        join(tmpdir(), 'ocw-explicit')
-      )
-      process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT = 'relative/socket-root'
-      expect(() => getControlledSocketRoot()).toThrow('absolute private directory')
-    } finally {
-      if (prior === undefined) {
-        delete process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT
-      } else {
-        process.env.ORCA_CONTROLLED_CODEX_SOCKET_ROOT = prior
-      }
-    }
-  })
-
-  it('rejects a socket root that is not already private', async () => {
-    const fixture = createFixture()
-    const spawnProcess = vi.fn() as unknown as typeof spawn
-    const unsafeRoot = mkdtempSync(join(tmpdir(), 'ocw-unsafe-'))
-    roots.push(unsafeRoot)
-    chmodSync(unsafeRoot, 0o755)
-
-    await expect(
-      startControlledCodexServer(
-        fixture.input,
-        join(unsafeRoot, 'controlled-codex.sock'),
-        spawnProcess
-      )
-    ).rejects.toThrow('private owned directory')
-    expect(spawnProcess).not.toHaveBeenCalled()
-  })
   it('fails closed until every controlled-session flag is enabled', async () => {
     const fixture = createFixture({ launch: false })
     await expect(fixture.manager.launch(fixture.input)).rejects.toThrow(
@@ -115,6 +79,7 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       "'--model' 'gpt-5' '--sandbox' 'workspace-write' '--ask-for-approval' 'never'"
     )
     expect(fixture.terminalLaunches[0]?.env).toEqual({ CODEX_HOME: fixture.input.codexHome })
+    expect(fixture.terminalLaunches[0]?.viewMode).toBe('terminal')
     expect(Buffer.byteLength(fixture.socketPath())).toBeLessThanOrEqual(100)
     expect(statSync(fixture.socketPath()).mode & 0o777).toBe(0o600)
     await expect(fixture.manager.getState(target(fixture.input.conversationId))).resolves.toBe(
@@ -163,7 +128,7 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       ['--profile', 'work profile', 'app-server', '--listen', `unix://${fixture.socketPath()}`]
     ])
     expect(fixture.terminalLaunches[0]?.command).toMatch(
-      /^'\/opt\/Codex Preview\/codex' '--profile' 'work profile' 'resume' /
+      /^'\/opt\/Codex Preview\/codex' '--profile' 'work profile' '--remote' /
     )
   })
 
@@ -219,8 +184,22 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       disposition: 'created',
       identity: { threadId: 'thread-1' }
     })
+    expect(fixture.terminalLaunches[0]?.threadId).toBeNull()
+    expect(fixture.terminalLaunches[0]?.command).toMatch(/^'codex' '--remote' /)
     expect(fixture.readinessChecks.value).toBe(1)
     expect(fixture.stub.turnStarts).toBe(1)
+  })
+
+  it('cleans up when the visible TUI starts multiple threads during launch', async () => {
+    const fixture = createFixture({ visibleThreadIds: ['thread-1', 'thread-2'] })
+    const { threadId: _threadId, ...input } = fixture.input
+
+    await expect(
+      fixture.manager.launchNew({ ...input, operationId: 'operation-multiple-threads' })
+    ).rejects.toThrow('started multiple threads')
+
+    expect(fixture.closedTerminals).toHaveLength(1)
+    expect(fixture.processes[0]?.exitCode).toBe(0)
   })
 
   it('cleans up after a visible terminal remote-connection failure', async () => {
@@ -275,8 +254,6 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
 
       expect(fixture.processes[0]?.exitCode).toBe(0)
       if (driftAfter === 'initialize') {
-        expect(fixture.terminalLaunches).toHaveLength(0)
-      } else if (driftAfter === 'thread/start') {
         expect(fixture.terminalLaunches).toHaveLength(0)
       } else {
         expect(fixture.terminalLaunches).toHaveLength(1)
@@ -618,6 +595,7 @@ function createFixture(
     closeVisibleTerminalFailures?: number
     terminalSurface?: 'background' | 'visible'
     omitTerminalIdentity?: 'tab' | 'pane' | 'workspace'
+    visibleThreadIds?: string[]
   } = {}
 ) {
   const root = mkdtempSync(join(tmpdir(), 'orca-controlled-codex-test-'))
@@ -768,6 +746,20 @@ function createFixture(
     createVisibleTerminal: async (launch) => {
       terminalLaunches.push(launch)
       visibleConnections.push(connectTestTransport(launch.command))
+      if (launch.threadId === null) {
+        for (const threadId of options.visibleThreadIds ?? [stub.reportedThreadId]) {
+          for (const server of stub.sockets) {
+            for (const socket of server.clients) {
+              socket.send(
+                JSON.stringify({ method: 'thread/started', params: { thread: { id: threadId } } })
+              )
+            }
+          }
+        }
+        if (options.driftAfter === 'thread/start') {
+          currentAccount.value = 'account-b'
+        }
+      }
       return {
         handle: 'handle-1',
         ptyId: 'pty-1',

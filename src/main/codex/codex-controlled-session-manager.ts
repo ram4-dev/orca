@@ -54,8 +54,9 @@ type ControlledTerminalLaunch = {
   command: string
   cwd: string
   env: Record<string, string>
+  viewMode: 'terminal'
   conversationId: string
-  threadId: string
+  threadId: string | null
 }
 
 export type CodexControlledSessionManagerOptions = {

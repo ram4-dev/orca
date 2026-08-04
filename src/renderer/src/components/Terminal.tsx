@@ -11,7 +11,6 @@ import {
   type BackgroundMountTerminalWorktreeDetail
 } from '@/constants/terminal'
 import { useAppStore } from '../store'
-import { folderWorkspaceKey } from '../../../shared/workspace-scope'
 import { useAllWorktrees } from '../store/selectors'
 import { getConnectionId } from '../lib/connection-context'
 import { basename } from '../lib/path'
@@ -166,6 +165,7 @@ import {
   combineTerminalWorktreeParkIds,
   useManualTerminalWorktreeParking
 } from './terminal-pane/use-manual-terminal-worktree-parking'
+import { collectTerminalWorkspaceSurfaces } from './terminal/terminal-workspace-surface-catalog'
 
 const EditorPanel = lazy(() => import('./editor/EditorPanel'))
 
@@ -284,23 +284,25 @@ function Terminal(): React.JSX.Element | null {
   const terminalWorktreeParkingTimersRef = useRef(new Map<string, number>())
   const allWorktrees = useAllWorktrees()
   const folderWorkspaces = useAppStore((s) => s.folderWorkspaces)
-  const workspaceSurfaces = useMemo(
-    () => [
-      ...allWorktrees.map((worktree) => ({ id: worktree.id, path: worktree.path })),
-      ...folderWorkspaces.map((workspace) => ({
-        id: folderWorkspaceKey(workspace.id),
-        path: workspace.folderPath
-      }))
-    ],
-    [allWorktrees, folderWorkspaces]
-  )
+  const detectedWorktreesByRepo = useAppStore((s) => s.detectedWorktreesByRepo)
   const activeWorktreeId = useAppStore((s) => s.activeWorktreeId)
+  const tabsByWorktree = useAppStore((s) => s.tabsByWorktree)
+  const workspaceSurfaces = useMemo(
+    () =>
+      collectTerminalWorkspaceSurfaces({
+        visibleWorktrees: allWorktrees,
+        folderWorkspaces,
+        detectedWorktreesByRepo,
+        activeWorktreeId,
+        terminalTabsByWorktree: tabsByWorktree
+      }),
+    [activeWorktreeId, allWorktrees, detectedWorktreesByRepo, folderWorkspaces, tabsByWorktree]
+  )
   const renderedActiveWorktreeId = activeWorktreeId
   const activeWorktreeDeferralHostId = useAppStore((s) =>
     getResolvedExecutionHostIdForWorktree(s, renderedActiveWorktreeId)
   )
   const activeView = useAppStore((s) => s.activeView)
-  const tabsByWorktree = useAppStore((s) => s.tabsByWorktree)
   const pendingStartupByTabId = useAppStore((s) => s.pendingStartupByTabId)
   const terminalParkingEnabled = useAppStore((s) => s.settings?.terminalHiddenViewParking !== false)
   const terminalSshParkingEnabled = useAppStore((s) => s.settings?.terminalSshViewParking !== false)

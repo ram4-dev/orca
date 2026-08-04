@@ -2317,7 +2317,10 @@ void app.whenReady().then(async () => {
         title: 'Codex',
         presentation: 'focused',
         launchAgent: 'codex',
-        resumeProviderSession: { key: 'session_id', id: launch.threadId }
+        viewMode: launch.viewMode,
+        ...(launch.threadId
+          ? { resumeProviderSession: { key: 'session_id' as const, id: launch.threadId } }
+          : {})
       }),
     waitForVisibleTerminal: async (terminal) => {
       const current = runtimeService.resolveTerminalPane(

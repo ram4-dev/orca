@@ -3,12 +3,11 @@ import { CodexControlledFailedLaunchCleanupRegistry } from './codex-controlled-f
 import { CodexControlledSessionCleanupCoordinator } from './codex-controlled-session-cleanup-coordinator'
 import { CodexControlledSessionLifecycle } from './codex-controlled-session-lifecycle'
 import { trackControlledSessionLaunch } from './codex-controlled-session-launch-tracker'
+import { createReadyControlledNewThreadTerminal } from './codex-controlled-new-thread-terminal'
 import {
   assertControlledThreadAlive,
   buildControlledThreadResumeParams,
-  buildControlledThreadStartParams,
   controlledLaunchOutcomeUnknown,
-  extractControlledThreadId,
   getControlledSocketPath,
   getControlledVisibleSocketPath,
   isSameControlledLaunch,
@@ -208,30 +207,33 @@ export class CodexControlledSessionRegistry {
       this.assertLaunchPermitted(provisional)
       client = await connectControlledCodexClient(provisional, socketPath)
       this.assertLaunchPermitted(provisional)
-      threadStartAttempted = true
-      const started = await client.request(
-        'thread/start',
-        buildControlledThreadStartParams(provisional)
-      )
-      launch = { ...input, threadId: extractControlledThreadId(started) }
-      this.assertLaunchPermitted(launch)
       visibleTransport = await startControlledVisibleTransport(
         socketPath,
         getControlledVisibleSocketPath(socketRoot, input.conversationId)
       )
-      identity = await createReadyControlledTerminal(
+      threadStartAttempted = true
+      const started = await createReadyControlledNewThreadTerminal(
         this.options,
-        launch,
+        provisional,
         visibleTransport,
         command,
         (created) => {
           identity = created
         },
-        server
+        server,
+        client
       )
+      identity = started.identity
+      launch = { ...input, threadId: started.threadId }
+      this.assertLaunchPermitted(launch)
       assertControlledServerAlive(server)
       visibleTransport.assertLive()
       await assertControlledThreadAlive(client, launch.threadId)
+      try {
+        started.capture.assertExact(launch.threadId)
+      } finally {
+        started.capture.stop()
+      }
       assertControlledServerAlive(server)
       visibleTransport.assertLive()
       this.assertLaunchPermitted(launch)
