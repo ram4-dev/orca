@@ -1,3 +1,5 @@
+import { isAbsolute } from 'node:path'
+import { quotePosixShell } from '../../../shared/wsl-login-shell-command'
 import type { OrchestrationCliCommand } from './cli-command'
 
 export type PreambleParams = {
@@ -48,7 +50,7 @@ export function buildDispatchPreamble(params: PreambleParams): string {
   // Why: in dev mode, agents must use orca-dev to connect to the dev runtime's
   // socket. Without this, agents inside the dev Electron app would call the
   // production CLI and talk to the wrong Orca instance (Section 6.4).
-  const cli = params.devMode ? 'orca-dev' : (params.cliCommand ?? 'orca')
+  const cli = params.devMode ? 'orca-dev' : formatCliCommand(params.cliCommand ?? 'orca')
   const postDoneInstructions = buildPostWorkerDoneInstructions({
     cli,
     workerKind: params.workerKind ?? 'prompt-returning-agent'
@@ -142,6 +144,16 @@ ${postDoneInstructions}`
 
 === TASK ===
 ${params.taskSpec}`
+}
+
+function formatCliCommand(command: OrchestrationCliCommand): string {
+  if (command === 'orca' || command === 'orca-ide' || command === 'orca-wake') {
+    return command
+  }
+  if (!isAbsolute(command)) {
+    throw new Error('orchestration CLI command must be absolute')
+  }
+  return quotePosixShell(command)
 }
 
 function buildPostWorkerDoneInstructions({

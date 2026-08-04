@@ -56,6 +56,7 @@ const ORCA_DIAGNOSTICS_TOKEN_URL_LITERAL =
   typeof orcaDiagnosticsTokenUrl === 'string' && orcaDiagnosticsTokenUrl.length > 0
     ? JSON.stringify(orcaDiagnosticsTokenUrl)
     : 'null'
+const ORCA_WAKE_DEV_BUILD_LITERAL = process.env.ORCA_WAKE_DEV_BUILD === '1' ? 'true' : 'false'
 
 function createStartupDiagnosticsBanner(chunkName: string): string {
   return `
@@ -210,6 +211,9 @@ export const electronViteConfig: UserConfig = {
           'browser-window-close-preload': resolve('src/preload/browser-window-close.ts'),
           'daemon-entry': resolve('src/main/daemon/daemon-entry.ts'),
           'plugin-host-entry': resolve('src/main/plugins/plugin-host-entry.ts'),
+          'codex-controlled-orca-mcp-entry': resolve(
+            'src/main/codex/codex-controlled-orca-mcp-entry.ts'
+          ),
           'computer-sidecar': resolve('src/main/computer/sidecar-entry.ts'),
           'stt-worker': resolve('src/main/speech/stt-worker.ts'),
           'warp-theme-parser-worker': resolve('src/main/warp-themes/warp-theme-parser-worker.ts'),
@@ -253,7 +257,8 @@ export const electronViteConfig: UserConfig = {
     define: {
       ORCA_BUILD_IDENTITY: ORCA_BUILD_IDENTITY_LITERAL,
       ORCA_POSTHOG_WRITE_KEY: ORCA_POSTHOG_WRITE_KEY_LITERAL,
-      ORCA_DIAGNOSTICS_TOKEN_URL: ORCA_DIAGNOSTICS_TOKEN_URL_LITERAL
+      ORCA_DIAGNOSTICS_TOKEN_URL: ORCA_DIAGNOSTICS_TOKEN_URL_LITERAL,
+      ORCA_WAKE_DEV_BUILD: ORCA_WAKE_DEV_BUILD_LITERAL
     },
     // Why: @xterm/headless declares "exports": null in package.json, which
     // prevents Vite's default resolver from finding the CJS entry. Point

@@ -18,7 +18,8 @@ import { planMobileTerminalTabMount } from '@/lib/mobile-terminal-tab-mount'
 import { resolveTerminalTabPtyOwnership } from '@/lib/terminal-tab-for-pty-id'
 import {
   hasRegisteredRuntimeTerminalTab,
-  focusRuntimeTerminalSurface
+  focusRuntimeTerminalSurface,
+  waitForPublishedRuntimeTerminalIdentity
 } from '@/runtime/sync-runtime-graph'
 import type { SplitTerminalPaneDetail, CloseTerminalPaneDetail } from '@/constants/terminal'
 import { getVisibleWorktreeIds } from '@/components/sidebar/visible-worktrees'
@@ -113,6 +114,7 @@ import { singlePaneLayoutSnapshot } from '@/store/slices/terminal-helpers'
 import { buildWorkspaceSessionPayload } from '@/lib/workspace-session'
 import { persistWorkspaceSessionByHost } from '@/lib/workspace-session-host-persistence'
 import { verifyTerminalRevealIdentity } from '@/lib/terminal-reveal-identity'
+import { TERMINAL_CREATE_SETTLEMENT_UNAVAILABLE_ERROR } from '../../../shared/terminal-reveal-identity'
 import { getLinearIssueWorkspaceName } from '../../../shared/workspace-name'
 import type { RuntimeClientEvent } from '../../../shared/runtime-client-events'
 import { applyHostWorktreeTerminalSleepState } from '@/components/terminal-pane/pty-shutdown-exit-deferral'
@@ -601,6 +603,27 @@ function getWorktreeRuntimeEnvironmentId(worktreeId: string | null | undefined):
 export function useIpcEvents(): void {
   useEffect(() => {
     const unsubs: (() => void)[] = []
+    const pendingRegisteredTerminalCreates = new Map<
+      string,
+      { tabId: string; settlementTimer: ReturnType<typeof setTimeout> | null }
+    >()
+    const settleRegisteredTerminalCreate = (requestId: string, accepted: boolean): void => {
+      const pending = pendingRegisteredTerminalCreates.get(requestId)
+      if (!pending) {
+        return
+      }
+      pendingRegisteredTerminalCreates.delete(requestId)
+      if (pending.settlementTimer) {
+        clearTimeout(pending.settlementTimer)
+      }
+      if (!accepted) {
+        closeTerminalTab(pending.tabId, {
+          force: true,
+          reason: 'cleanup',
+          captureRecentlyClosed: false
+        })
+      }
+    }
     const reconnectAuthorityByTarget = new Map<string, DirectSshAuthority>()
     const authorityReconciliationDeadlines = new Set<{
       timer: ReturnType<typeof setTimeout>
@@ -1646,6 +1669,13 @@ export function useIpcEvents(): void {
     )
 
     // Why: CLI-driven terminal creation waits for the tabId reply so it can hand the caller a usable handle immediately.
+    if (window.api.ui.onSettleTerminalCreate) {
+      unsubs.push(
+        window.api.ui.onSettleTerminalCreate(({ requestId, accepted }) => {
+          settleRegisteredTerminalCreate(requestId, accepted)
+        })
+      )
+    }
     unsubs.push(
       window.api.ui.onRequestTerminalCreate((data) => {
         try {
@@ -1680,6 +1710,13 @@ export function useIpcEvents(): void {
             })
             return
           }
+          if (data.requireRegisteredIdentity && !window.api.ui.onSettleTerminalCreate) {
+            window.api.ui.replyTerminalCreate({
+              requestId: data.requestId,
+              error: TERMINAL_CREATE_SETTLEMENT_UNAVAILABLE_ERROR
+            })
+            return
+          }
           const terminalPresentation = resolveTerminalPresentation(data)
           const shouldActivate = terminalPresentation === 'focused'
           const shouldSurfaceOwner =
@@ -1690,6 +1727,7 @@ export function useIpcEvents(): void {
           // Why: the paired launch client already resolved the mode, so its choice wins over the host renderer's local default.
           const tabOptions = data.launchAgent
             ? {
+                ...(data.tabId !== undefined ? { id: data.tabId } : {}),
                 ...(shouldActivate ? {} : { activate: false, recordInteraction: false }),
                 launchAgent: data.launchAgent,
                 ...(data.viewMode
@@ -1704,9 +1742,15 @@ export function useIpcEvents(): void {
               }
             : shouldActivate
               ? data.cwd
-                ? { startupCwd: data.cwd }
-                : undefined
+                ? {
+                    ...(data.tabId !== undefined ? { id: data.tabId } : {}),
+                    startupCwd: data.cwd
+                  }
+                : data.tabId !== undefined
+                  ? { id: data.tabId }
+                  : undefined
               : {
+                  ...(data.tabId !== undefined ? { id: data.tabId } : {}),
                   activate: false,
                   recordInteraction: false,
                   ...(data.cwd ? { startupCwd: data.cwd } : {})
@@ -1770,11 +1814,50 @@ export function useIpcEvents(): void {
                 : {})
             })
           }
-          window.api.ui.replyTerminalCreate({
-            requestId: data.requestId,
-            tabId: tab.id,
-            title: data.title ?? tab.title
-          })
+          if (!data.requireRegisteredIdentity) {
+            window.api.ui.replyTerminalCreate({
+              requestId: data.requestId,
+              tabId: tab.id,
+              title: data.title ?? tab.title
+            })
+            return
+          }
+          const pendingCreate: {
+            tabId: string
+            settlementTimer: ReturnType<typeof setTimeout> | null
+          } = { tabId: tab.id, settlementTimer: null }
+          settleRegisteredTerminalCreate(data.requestId, false)
+          pendingRegisteredTerminalCreates.set(data.requestId, pendingCreate)
+          void waitForPublishedRuntimeTerminalIdentity(worktreeId, tab.id)
+            .then((identity) => {
+              if (pendingRegisteredTerminalCreates.get(data.requestId) !== pendingCreate) {
+                return
+              }
+              // Why: if main disappears after the reply, renderer ownership expires closed instead of leaving an unaccepted tab.
+              pendingCreate.settlementTimer = setTimeout(() => {
+                settleRegisteredTerminalCreate(data.requestId, false)
+              }, 10_000)
+              window.api.ui.replyTerminalCreate({
+                requestId: data.requestId,
+                tabId: tab.id,
+                title: data.title ?? tab.title,
+                identity
+              })
+            })
+            .catch((error: unknown) => {
+              if (pendingRegisteredTerminalCreates.get(data.requestId) !== pendingCreate) {
+                return
+              }
+              settleRegisteredTerminalCreate(data.requestId, false)
+              window.api.ui.replyTerminalCreate({
+                requestId: data.requestId,
+                tabId: tab.id,
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Renderer terminal identity registration failed'
+              })
+            })
         } catch (err) {
           window.api.ui.replyTerminalCreate({
             requestId: data.requestId,
@@ -3561,6 +3644,9 @@ export function useIpcEvents(): void {
       pendingAgentStatusEvents.length = 0
       mobileStateHydrationDisposed = true
       pendingMobileStateEvents.length = 0
+      for (const requestId of pendingRegisteredTerminalCreates.keys()) {
+        settleRegisteredTerminalCreate(requestId, false)
+      }
       unsubscribeRuntimeEnvironmentStore()
       unsubscribeAgentStatusStore()
       unsubs.forEach((fn) => fn())

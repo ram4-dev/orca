@@ -4,6 +4,7 @@ const callMock = vi.hoisted(() => vi.fn())
 const getTerminalHandleMock = vi.hoisted(() => vi.fn())
 const originalTerminalHandle = process.env.ORCA_TERMINAL_HANDLE
 const originalPaneKey = process.env.ORCA_PANE_KEY
+const originalCliCommand = process.env.ORCA_CLI_COMMAND
 
 vi.mock('../format', () => ({ printResult: vi.fn() }))
 vi.mock('../selectors', () => ({ getTerminalHandle: getTerminalHandleMock }))
@@ -16,6 +17,7 @@ describe('orchestration check identity', () => {
     getTerminalHandleMock.mockReset()
     delete process.env.ORCA_TERMINAL_HANDLE
     delete process.env.ORCA_PANE_KEY
+    delete process.env.ORCA_CLI_COMMAND
   })
 
   afterEach(() => {
@@ -28,6 +30,11 @@ describe('orchestration check identity', () => {
       delete process.env.ORCA_PANE_KEY
     } else {
       process.env.ORCA_PANE_KEY = originalPaneKey
+    }
+    if (originalCliCommand === undefined) {
+      delete process.env.ORCA_CLI_COMMAND
+    } else {
+      process.env.ORCA_CLI_COMMAND = originalCliCommand
     }
   })
 
@@ -89,6 +96,18 @@ describe('orchestration check identity', () => {
         unread: true,
         inject: true
       })
+    )
+  })
+
+  it('propagates the branded CLI command exactly', async () => {
+    process.env.ORCA_TERMINAL_HANDLE = 'term_wake_worker'
+    process.env.ORCA_CLI_COMMAND = 'orca-wake'
+
+    await invokeCheck(new Map())
+
+    expect(callMock).toHaveBeenCalledWith(
+      'orchestration.check',
+      expect.objectContaining({ compatibilityCliCommand: 'orca-wake' })
     )
   })
 })
