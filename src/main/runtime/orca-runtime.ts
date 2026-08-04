@@ -24560,6 +24560,7 @@ export class OrcaRuntimeService {
     const shouldCreateInBackground =
       worktreeSelector !== undefined &&
       (Boolean(opts.agentSessionClaim) ||
+        opts.rendererBacked === false ||
         (!requiresRendererFocus && opts.rendererBacked !== true) ||
         // Why: `orca serve` exposes the local runtime without a renderer
         // window. Renderer-backed Codex terminals are preferred for the app,

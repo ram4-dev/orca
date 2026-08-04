@@ -5,6 +5,7 @@ import type {
 } from '../runtime/orchestration/conversation-wake-provider'
 import type { CodexControlledSessionStateStore } from './codex-controlled-session-state'
 import type { CodexUnixAppServerClient } from './codex-unix-app-server-client'
+import { isUnmaterializedControlledThreadTurnsError } from './codex-controlled-thread-response'
 
 type FinalizerSession = {
   threadId: string
@@ -110,10 +111,18 @@ export class CodexControlledTurnFinalizer {
   }
 
   private async findTurn(clientMessageId: string): Promise<string | null> {
-    const response = await this.session.client.request('thread/read', {
-      threadId: this.session.threadId,
-      includeTurns: true
-    })
+    let response: unknown
+    try {
+      response = await this.session.client.request('thread/read', {
+        threadId: this.session.threadId,
+        includeTurns: true
+      })
+    } catch (error) {
+      if (isUnmaterializedControlledThreadTurnsError(error, this.session.threadId)) {
+        return null
+      }
+      throw error
+    }
     if (
       !isRecord(response) ||
       !isRecord(response.thread) ||

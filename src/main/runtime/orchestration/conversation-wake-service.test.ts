@@ -211,7 +211,12 @@ describe('ConversationWakeService', () => {
       dispatchId: state.dispatch.id,
       idempotencyKey: `orca-orchestration-wake:${job?.wake_id}`
     })
-    expect(state.provider.requests[0].prompt).not.toContain(state.task.id)
+    expect(state.provider.requests[0].prompt).toContain('The Orca worker finished.')
+    expect(state.provider.requests[0].prompt).toContain(`Task: ${state.task.id}.`)
+    expect(state.provider.requests[0].prompt).toContain(`Dispatch: ${state.dispatch.id}.`)
+    expect(state.provider.requests[0].prompt).toContain(
+      'even if the Orca CLI or durable mailbox is temporarily unavailable'
+    )
     expect(job).toMatchObject({ status: 'submitted', attempt_count: 1 })
     expect(state.db.getMessageById(message.id)).toMatchObject({ read: 0, delivered_at: null })
   })

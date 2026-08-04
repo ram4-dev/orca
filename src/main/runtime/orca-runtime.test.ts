@@ -13463,6 +13463,43 @@ describe('OrcaRuntimeService', () => {
     expect(spawnOptions?.persistHostSessionBinding).toBeUndefined()
   })
 
+  it('host-spawns an explicitly non-renderer-backed focused terminal before revealing it', async () => {
+    const spawn = vi.fn().mockResolvedValue({ id: 'pty-controlled' })
+    const runtime = new OrcaRuntimeService(store)
+    const webContents = { send: vi.fn() }
+    electronMocks.BrowserWindow.fromId.mockReturnValue({
+      isDestroyed: () => false,
+      webContents
+    } as never)
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+
+    await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+      command: 'codex resume --remote unix:///tmp/controlled.sock thread-1',
+      env: { CODEX_HOME: '/codex-home' },
+      launchAgent: 'codex',
+      rendererBacked: false,
+      presentation: 'focused'
+    })
+
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'codex resume --remote unix:///tmp/controlled.sock thread-1',
+        launchAgent: 'codex'
+      })
+    )
+    expect(webContents.send).not.toHaveBeenCalledWith(
+      'terminal:requestTabCreate',
+      expect.anything()
+    )
+  })
+
   it('falls back to background terminal creation for renderer-backed requests without a renderer window', async () => {
     const spawn = vi.fn().mockResolvedValue({ id: 'pty-bg' })
     const runtime = new OrcaRuntimeService(store)

@@ -1,4 +1,5 @@
 import type { ControlledCodexSession } from './codex-controlled-session-registry'
+import { isUnmaterializedControlledThreadTurnsError } from './codex-controlled-thread-response'
 
 export async function submitControlledInitialTurn(
   session: ControlledCodexSession,
@@ -52,10 +53,18 @@ async function findClientTurn(
   session: ControlledCodexSession,
   clientId: string
 ): Promise<string | null> {
-  const response = await session.client.request('thread/read', {
-    threadId: session.launch.threadId,
-    includeTurns: true
-  })
+  let response: unknown
+  try {
+    response = await session.client.request('thread/read', {
+      threadId: session.launch.threadId,
+      includeTurns: true
+    })
+  } catch (error) {
+    if (isUnmaterializedControlledThreadTurnsError(error, session.launch.threadId)) {
+      return null
+    }
+    throw error
+  }
   const turns = isRecord(response) && isRecord(response.thread) ? response.thread.turns : null
   if (!Array.isArray(turns)) {
     return null

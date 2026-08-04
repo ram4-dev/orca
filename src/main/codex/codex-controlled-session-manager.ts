@@ -7,6 +7,9 @@ import type {
 } from '../runtime/orchestration/conversation-wake-provider'
 import { CodexControlledSessionRegistry } from './codex-controlled-session-registry'
 import type { ControlledCodexSession } from './codex-controlled-session-registry'
+import type { ControlledDynamicToolOptions } from './codex-controlled-dynamic-tool-handler'
+import type { CodexUnixAppServerClient } from './codex-unix-app-server-client'
+import type { ControlledVisibleTerminalLaunch } from './codex-controlled-visible-terminal-options'
 import { createControlledSessionFence } from './codex-controlled-session-fence'
 import { CodexControlledTurnFinalizer } from './codex-controlled-turn-finalizer'
 import {
@@ -49,19 +52,9 @@ export type PreparedCodexControlledNewSessionLaunch = {
   command: ControlledCodexCommand
 }
 
-type ControlledTerminalLaunch = {
-  worktreeSelector: string
-  command: string
-  cwd: string
-  env: Record<string, string>
-  viewMode: 'terminal'
-  conversationId: string
-  threadId: string | null
-}
-
-export type CodexControlledSessionManagerOptions = {
+export type CodexControlledSessionManagerOptions = ControlledDynamicToolOptions & {
   stateRoot: string
-  createVisibleTerminal: (launch: ControlledTerminalLaunch) => Promise<{
+  createVisibleTerminal: (launch: ControlledVisibleTerminalLaunch) => Promise<{
     handle: string
     ptyId?: string | null
     tabId?: string
@@ -82,6 +75,8 @@ export type CodexControlledSessionManagerOptions = {
   ) => Promise<CodexControlledSessionIdentity>
   closeVisibleTerminal: (terminal: CodexControlledSessionIdentity) => Promise<void>
   ensureVisibleTerminalStopped: (terminal: CodexControlledSessionIdentity) => Promise<void>
+  inspectVisibleTerminal?: (terminal: CodexControlledSessionIdentity) => Promise<string>
+  materializeThread?: (client: CodexUnixAppServerClient, threadId: string) => Promise<void>
   resolveCurrentAccountId: () => string | null
   resolveCurrentAccountRevision?: () => number
   isControlledLaunchEnabled?: () => boolean

@@ -3,13 +3,18 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { chmodSync, existsSync, lstatSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { resolveStartupShell, tokenizeStartupCommand } from '../../shared/tui-agent-startup-shell'
-import { quotePosixShell } from '../../shared/wsl-login-shell-command'
+import { buildControlledOrcaMcpArgs } from './codex-controlled-orca-mcp-command'
+import {
+  getControlledOrcaMcpBindingPath,
+  removeControlledOrcaMcpBinding
+} from './codex-controlled-orca-mcp-binding'
 export {
   getControlledSocketPath,
   getControlledSocketRoot,
   getControlledStatePath,
   getControlledVisibleSocketPath
 } from './codex-controlled-socket-paths'
+export { buildControlledVisibleResumeCommand } from './codex-controlled-visible-resume-command'
 
 const SOCKET_READY_TIMEOUT_MS = 10_000
 const PROCESS_STOP_TIMEOUT_MS = 5_000
@@ -66,34 +71,24 @@ export function buildControlledThreadResumeParams(
 }
 
 export function buildControlledThreadStartParams(
-  input: CodexControlledSessionLaunch
+  input: CodexControlledSessionLaunch,
+  dynamicTools: Record<string, unknown>[] = [],
+  controlledOrcaMcpEnabled = false
 ): Record<string, unknown> {
   return {
     cwd: input.cwd,
     ...(input.model ? { model: input.model } : {}),
     ...(input.sandbox ? { sandbox: input.sandbox } : {}),
     ...(input.approvalPolicy ? { approvalPolicy: input.approvalPolicy } : {}),
+    ...(dynamicTools.length > 0 || controlledOrcaMcpEnabled
+      ? {
+          developerInstructions:
+            'When the user asks to orchestrate an Orca worker, call the orca_controlled MCP tool orca_launch_worker. Do not run the orca or orca-wake CLI from the shell. The tool returns after launch; report that launch immediately and do not wait for completion. Orca will wake this same conversation when the worker finishes.'
+        }
+      : {}),
+    ...(dynamicTools.length > 0 ? { dynamicTools } : {}),
     experimentalRawEvents: false
   }
-}
-
-export function buildControlledVisibleResumeCommand(
-  input: CodexControlledSessionLaunch,
-  socketPath: string,
-  command: ControlledCodexCommand = resolveControlledCodexCommand(input.command)
-): string {
-  const args = ['resume', '--remote', `unix://${socketPath}`]
-  if (input.model) {
-    args.push('--model', input.model)
-  }
-  if (input.sandbox) {
-    args.push('--sandbox', input.sandbox)
-  }
-  if (input.approvalPolicy) {
-    args.push('--ask-for-approval', input.approvalPolicy)
-  }
-  args.push('--cd', input.cwd, input.threadId)
-  return [command.executable, ...command.prefixArgs, ...args].map(quotePosixShell).join(' ')
 }
 
 export function isSameControlledLaunch(
@@ -164,7 +159,17 @@ export async function startControlledCodexServer(
   }
   const child = spawnProcess(
     command.executable,
-    [...command.prefixArgs, 'app-server', '--listen', `unix://${socketPath}`],
+    [
+      ...command.prefixArgs,
+      ...buildControlledOrcaMcpArgs(
+        process.execPath,
+        undefined,
+        getControlledOrcaMcpBindingPath(socketPath)
+      ),
+      'app-server',
+      '--listen',
+      `unix://${socketPath}`
+    ],
     {
       cwd: input.cwd,
       env: { ...process.env, CODEX_HOME: input.codexHome },
@@ -207,6 +212,7 @@ export async function stopControlledCodexServer(
   }
   if (server.socketIdentity) {
     removeOwnedSocket(socketPath, server.socketIdentity)
+    removeControlledOrcaMcpBinding(socketPath)
   }
 }
 

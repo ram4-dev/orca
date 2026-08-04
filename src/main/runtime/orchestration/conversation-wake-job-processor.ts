@@ -280,8 +280,27 @@ function buildTurnRequest(
     taskId: job.task_id,
     dispatchId: job.dispatch_id,
     acceptedTurnId,
-    prompt:
-      'Orca committed a supervised orchestration event. Check the durable mailbox for the bound Run and continue without inferring acknowledgment from this wake.',
+    prompt: buildWakePrompt(job),
     commitPrepared
   }
+}
+
+function buildWakePrompt(job: ConversationWakeJobRow): string {
+  const event =
+    job.message_type === 'worker_done'
+      ? 'The Orca worker finished.'
+      : job.message_type === 'escalation'
+        ? 'An Orca worker needs coordinator attention.'
+        : job.message_type === 'decision_gate'
+          ? 'An Orca worker is waiting at a decision gate.'
+          : 'An Orca worker has a question for the coordinator.'
+  return [
+    'Orca authoritatively committed a supervised orchestration event.',
+    event,
+    `Event type: ${job.message_type}.`,
+    `Task: ${job.task_id ?? 'unavailable'}.`,
+    `Dispatch: ${job.dispatch_id ?? 'unavailable'}.`,
+    'Notify the user in this same conversation now, even if the Orca CLI or durable mailbox is temporarily unavailable.',
+    'This wake is not mailbox acknowledgment and contains no worker-authored result details; do not claim that the mailbox was consumed or invent result details.'
+  ].join(' ')
 }

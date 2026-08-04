@@ -214,6 +214,7 @@ import { startCodexSessionIndexHealInBackground } from './codex/codex-session-in
 import { createCodexSessionMigrationScheduler } from './codex/codex-session-migration-scheduler'
 import { prepareLegacySharedCodexSessionResume } from './codex/codex-legacy-session-resume'
 import { CodexControlledSessionManager } from './codex/codex-controlled-session-manager'
+import { buildControlledVisibleTerminalOptions } from './codex/codex-controlled-visible-terminal-options'
 import { resolveControlledCodexLaunchAuthority } from './codex/codex-controlled-launch-authority'
 import {
   assertControlledTerminalIdleResult,
@@ -2309,19 +2310,12 @@ void app.whenReady().then(async () => {
   let runtimeService!: OrcaRuntimeService
   const codexControlledSessionManager = new CodexControlledSessionManager({
     stateRoot: join(app.getPath('userData'), 'codex-controlled-sessions'),
+    controlledOrcaMcpEnabled: true,
     createVisibleTerminal: async (launch) =>
-      runtimeService.createTerminal(launch.worktreeSelector, {
-        command: launch.command,
-        cwd: launch.cwd,
-        env: launch.env,
-        title: 'Codex',
-        presentation: 'focused',
-        launchAgent: 'codex',
-        viewMode: launch.viewMode,
-        ...(launch.threadId
-          ? { resumeProviderSession: { key: 'session_id' as const, id: launch.threadId } }
-          : {})
-      }),
+      runtimeService.createTerminal(
+        launch.worktreeSelector,
+        buildControlledVisibleTerminalOptions(launch)
+      ),
     waitForVisibleTerminal: async (terminal) => {
       const current = runtimeService.resolveTerminalPane(
         terminal.terminalPaneKey,
@@ -2335,6 +2329,10 @@ void app.whenReady().then(async () => {
         throw new Error('controlled Codex visible terminal is not running')
       }
       return { ...terminal, terminalHandle: current.handle, terminalPtyId: current.ptyId }
+    },
+    inspectVisibleTerminal: async (terminal) => {
+      const read = await runtimeService.readTerminal(terminal.terminalHandle, { limit: 40 })
+      return read.tail.join('\n').slice(-4_000)
     },
     waitForVisibleRemoteAttachment: async (terminal, proof) =>
       waitForControlledTerminalReadiness({

@@ -3,7 +3,6 @@ import { submitControlledInitialTurn } from './codex-controlled-initial-turn'
 import { CodexUnixAppServerClient } from './codex-unix-app-server-client'
 import {
   assertControlledServerIdentity,
-  buildControlledVisibleResumeCommand,
   failControlledTerminalIdentity,
   getControlledLaunchFingerprint,
   getControlledStatePath,
@@ -11,6 +10,7 @@ import {
   type ControlledCodexServer,
   type CodexControlledSessionLaunch
 } from './codex-controlled-session-launch'
+import { buildControlledVisibleResumeCommand } from './codex-controlled-visible-resume-command'
 import type {
   CodexControlledNewSessionLaunch,
   CodexControlledSessionIdentity,

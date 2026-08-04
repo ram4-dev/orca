@@ -1,9 +1,13 @@
 import type { CodexUnixAppServerClient } from './codex-unix-app-server-client'
-import { CodexControlledFailedLaunchCleanupRegistry } from './codex-controlled-failed-launch-cleanup'
+import {
+  CodexControlledFailedLaunchCleanupRegistry,
+  rollbackControlledLaunchFailure
+} from './codex-controlled-failed-launch-cleanup'
 import { CodexControlledSessionCleanupCoordinator } from './codex-controlled-session-cleanup-coordinator'
 import { CodexControlledSessionLifecycle } from './codex-controlled-session-lifecycle'
 import { trackControlledSessionLaunch } from './codex-controlled-session-launch-tracker'
-import { createReadyControlledNewThreadTerminal } from './codex-controlled-new-thread-terminal'
+import * as ct from './codex-controlled-dynamic-tool-handler'
+import { bindControlledOrcaMcp } from './codex-controlled-orca-mcp-binding'
 import {
   assertControlledThreadAlive,
   buildControlledThreadResumeParams,
@@ -76,7 +80,7 @@ export class CodexControlledSessionRegistry {
     return trackControlledSessionLaunch(
       this.launches,
       input.conversationId,
-      (conversationId) => this.assertNotDisposing(conversationId),
+      (conversationId) => this.cleanupCoordinator.assertNotDisposing(conversationId),
       () => this.launchExistingThread(input)
     )
   }
@@ -84,7 +88,7 @@ export class CodexControlledSessionRegistry {
     input: CodexControlledSessionLaunch
   ): Promise<CodexControlledSessionLaunchResult> {
     const existing = this.sessions.get(input.conversationId)
-    this.assertNoFailedCleanup(input.conversationId)
+    ct.assertNoControlledFailedCleanup(this.failedLaunches.has(input.conversationId))
     if (existing) {
       if (!isSameControlledLaunch(existing.launch, input)) {
         throw new Error('controlled Codex conversation identity mismatch')
@@ -169,7 +173,7 @@ export class CodexControlledSessionRegistry {
     return trackControlledSessionLaunch(
       this.launches,
       input.conversationId,
-      (conversationId) => this.assertNotDisposing(conversationId),
+      (conversationId) => this.cleanupCoordinator.assertNotDisposing(conversationId),
       () => this.launchNewThread(input, command)
     )
   }
@@ -178,7 +182,7 @@ export class CodexControlledSessionRegistry {
     command: ControlledCodexCommand
   ): Promise<CodexControlledSessionLaunchResult> {
     const existing = this.sessions.get(input.conversationId)
-    this.assertNoFailedCleanup(input.conversationId)
+    ct.assertNoControlledFailedCleanup(this.failedLaunches.has(input.conversationId))
     if (existing) {
       this.assertNewLaunchMatches(existing.launch, input)
       if (existing.missing) {
@@ -207,33 +211,30 @@ export class CodexControlledSessionRegistry {
       this.assertLaunchPermitted(provisional)
       client = await connectControlledCodexClient(provisional, socketPath)
       this.assertLaunchPermitted(provisional)
+      threadStartAttempted = true
+      const threadId = await ct.startMaterializedControlledThread(client, provisional, this.options)
+      launch = { ...input, threadId }
+      this.assertLaunchPermitted(launch)
       visibleTransport = await startControlledVisibleTransport(
         socketPath,
         getControlledVisibleSocketPath(socketRoot, input.conversationId)
       )
-      threadStartAttempted = true
-      const started = await createReadyControlledNewThreadTerminal(
+      identity = await createReadyControlledTerminal(
         this.options,
-        provisional,
+        launch,
         visibleTransport,
         command,
         (created) => {
           identity = created
         },
         server,
-        client
+        ct.buildControlledNewThreadResume(launch, visibleTransport.socketPath, command)
       )
-      identity = started.identity
-      launch = { ...input, threadId: started.threadId }
       this.assertLaunchPermitted(launch)
       assertControlledServerAlive(server)
       visibleTransport.assertLive()
       await assertControlledThreadAlive(client, launch.threadId)
-      try {
-        started.capture.assertExact(launch.threadId)
-      } finally {
-        started.capture.stop()
-      }
+      bindControlledOrcaMcp(socketPath, launch, identity)
       assertControlledServerAlive(server)
       visibleTransport.assertLive()
       this.assertLaunchPermitted(launch)
@@ -245,6 +246,7 @@ export class CodexControlledSessionRegistry {
         client,
         identity
       )
+      ct.attachControlledDynamicToolHandler(client, this.options, launch, identity)
       assertControlledServerAlive(server)
       visibleTransport.assertLive()
       this.sessions.set(input.conversationId, session)
@@ -254,19 +256,18 @@ export class CodexControlledSessionRegistry {
       if (this.sessions.has(input.conversationId)) {
         throw controlledLaunchOutcomeUnknown(error)
       }
-      try {
-        await this.failedLaunches.rollback(
-          input.conversationId,
-          socketPath,
-          server,
-          visibleTransport,
-          client,
-          identity
-        )
-      } catch (cleanupError) {
-        Object.assign(toControlledSessionError(error), { cleanupError })
-      }
-      throw threadStartAttempted ? controlledLaunchOutcomeUnknown(error) : error
+      const launchError = await rollbackControlledLaunchFailure({
+        registry: this.failedLaunches,
+        conversationId: input.conversationId,
+        socketPath,
+        server,
+        visibleTransport,
+        client,
+        terminal: identity,
+        error,
+        inspect: this.options.inspectVisibleTerminal
+      })
+      throw threadStartAttempted ? controlledLaunchOutcomeUnknown(launchError) : launchError
     }
   }
 
@@ -296,17 +297,10 @@ export class CodexControlledSessionRegistry {
   }
 
   private assertLaunchPermitted(input: CodexControlledSessionLaunch): void {
-    this.assertNotDisposing(input.conversationId)
-    this.assertCanLaunch(input)
-  }
-
-  private assertNotDisposing(conversationId: string): void {
-    this.cleanupCoordinator.assertNotDisposing(conversationId)
-  }
-
-  private assertNoFailedCleanup(conversationId: string): void {
-    if (this.failedLaunches.has(conversationId)) {
-      throw new Error('controlled Codex conversation requires cleanup before relaunch')
-    }
+    ct.assertControlledLaunchPermitted(
+      input.conversationId,
+      (conversationId) => this.cleanupCoordinator.assertNotDisposing(conversationId),
+      () => this.assertCanLaunch(input)
+    )
   }
 }

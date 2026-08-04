@@ -6,6 +6,7 @@ import {
 import type { ControlledCodexServer } from './codex-controlled-session-launch'
 import type { CodexControlledSessionIdentity } from './codex-controlled-session-manager'
 import type { ControlledVisibleTransport } from './codex-controlled-visible-transport'
+import { appendControlledTerminalDiagnostic } from './codex-controlled-visible-terminal-options'
 
 type FailedLaunchCleanup = {
   socketPath: string
@@ -73,4 +74,35 @@ export class CodexControlledFailedLaunchCleanupRegistry {
       throw error
     }
   }
+}
+
+export async function rollbackControlledLaunchFailure(params: {
+  registry: CodexControlledFailedLaunchCleanupRegistry
+  conversationId: string
+  socketPath: string
+  server: ControlledCodexServer
+  visibleTransport: ControlledVisibleTransport | null
+  client: CodexUnixAppServerClient | null
+  terminal: CodexControlledSessionIdentity | null
+  error: unknown
+  inspect?: (terminal: CodexControlledSessionIdentity) => Promise<string>
+}): Promise<Error> {
+  const launchError = await appendControlledTerminalDiagnostic(
+    params.error instanceof Error ? params.error : new Error(String(params.error)),
+    params.terminal,
+    params.inspect
+  )
+  try {
+    await params.registry.rollback(
+      params.conversationId,
+      params.socketPath,
+      params.server,
+      params.visibleTransport,
+      params.client,
+      params.terminal
+    )
+  } catch (cleanupError) {
+    Object.assign(launchError, { cleanupError })
+  }
+  return launchError
 }

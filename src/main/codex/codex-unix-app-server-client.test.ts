@@ -93,7 +93,47 @@ describe.skipIf(process.platform === 'win32')('CodexUnixAppServerClient', () => 
     await vi.waitFor(() => expect(delivered).toHaveBeenCalledOnce())
     client.close()
   })
+
+  it('handles app-server dynamic tool requests and replies on the same request id', async () => {
+    let connected: WebSocket | undefined
+    let resolveReply: ((message: RpcMessage) => void) | undefined
+    const reply = new Promise<RpcMessage>((resolve) => {
+      resolveReply = resolve
+    })
+    const fixture = await createRpcServer((socket, message) => {
+      connected = socket
+      if (message.method === 'initialize') {
+        socket.send(JSON.stringify({ id: message.id, result: {} }))
+      } else if (message.id === 'tool-request-1') {
+        resolveReply?.(message)
+      }
+    })
+    const client = await CodexUnixAppServerClient.connect(fixture.socketPath)
+    client.onServerRequest(async (method, params) => ({ method, prompt: params.prompt }))
+
+    connected?.send(
+      JSON.stringify({
+        id: 'tool-request-1',
+        method: 'item/tool/call',
+        params: { prompt: 'write a README' }
+      })
+    )
+
+    await expect(reply).resolves.toMatchObject({
+      id: 'tool-request-1',
+      result: { method: 'item/tool/call', prompt: 'write a README' }
+    })
+    client.close()
+  })
 })
+
+type RpcMessage = {
+  id?: number | string
+  method?: string
+  params?: Record<string, unknown>
+  result?: unknown
+  error?: unknown
+}
 
 function createRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'orca-codex-client-'))
@@ -102,7 +142,7 @@ function createRoot(): string {
 }
 
 async function createRpcServer(
-  onRequest: (socket: WebSocket, message: { id: number; method: string }) => void
+  onRequest: (socket: WebSocket, message: RpcMessage) => void
 ): Promise<{ socketPath: string }> {
   const socketPath = join(createRoot(), 'rpc.sock')
   const server = createHttpServer()
@@ -116,9 +156,9 @@ async function createRpcServer(
   })
   webSocketServer.on('connection', (socket) => {
     socket.on('message', (raw) => {
-      const message = JSON.parse(raw.toString()) as { id?: number; method: string }
+      const message = JSON.parse(raw.toString()) as RpcMessage
       if (message.id !== undefined) {
-        onRequest(socket, { id: message.id, method: message.method })
+        onRequest(socket, message)
       }
     })
   })

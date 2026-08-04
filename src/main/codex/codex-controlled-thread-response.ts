@@ -20,6 +20,17 @@ export function isMissingControlledThreadError(error: unknown): boolean {
   )
 }
 
+export function isUnmaterializedControlledThreadTurnsError(
+  error: unknown,
+  threadId: string
+): boolean {
+  return (
+    error instanceof Error &&
+    error.message ===
+      `thread ${threadId} is not materialized yet; includeTurns is unavailable before first user message`
+  )
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }

@@ -15,6 +15,8 @@ import {
   type ControlledThreadStartCapture
 } from './codex-controlled-thread-start-notification'
 import type { ControlledVisibleTransport } from './codex-controlled-visible-transport'
+import { buildControlledOrcaMcpArgs } from './codex-controlled-orca-mcp-command'
+import { getControlledOrcaMcpBindingPath } from './codex-controlled-orca-mcp-binding'
 
 export async function createReadyControlledNewThreadTerminal(
   options: CodexControlledSessionManagerOptions,
@@ -59,7 +61,15 @@ function buildControlledVisibleStartCommand(
   socketPath: string,
   command: ControlledCodexCommand
 ): string {
-  const args = ['--remote', `unix://${socketPath}`]
+  const args = [
+    '--remote',
+    `unix://${socketPath}`,
+    ...buildControlledOrcaMcpArgs(
+      process.execPath,
+      undefined,
+      getControlledOrcaMcpBindingPath(socketPath)
+    )
+  ]
   if (input.model) {
     args.push('--model', input.model)
   }

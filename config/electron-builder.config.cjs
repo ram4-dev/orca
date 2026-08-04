@@ -178,6 +178,7 @@ module.exports = {
     'out/main/hermes/**',
     'out/main/daemon-entry.js',
     'out/main/plugin-host-entry.js',
+    'out/main/codex-controlled-orca-mcp-entry.js',
     'out/main/computer-sidecar.js',
     'out/main/parcel-watcher-process-entry.js',
     'out/main/chunks/**',

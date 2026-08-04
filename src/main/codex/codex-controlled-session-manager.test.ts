@@ -7,10 +7,8 @@ import type { ChildProcess, spawn } from 'node:child_process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocketServer } from 'ws'
 import type { ConversationWakeTurnRequest } from '../runtime/orchestration/conversation-wake-provider'
-import {
-  CodexControlledSessionManager,
-  type CodexControlledSessionLaunch
-} from './codex-controlled-session-manager'
+import { CodexControlledSessionManager } from './codex-controlled-session-manager'
+import type { CodexControlledSessionLaunch } from './codex-controlled-session-manager'
 import { resolveControlledCodexLaunchAuthority } from './codex-controlled-launch-authority'
 import {
   getControlledSocketPath,
@@ -93,10 +91,16 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
     await fixture.manager.launch(fixture.input)
 
     expect(fixture.spawnProcess).toHaveBeenCalledOnce()
-    expect(fixture.spawnProcess.mock.calls[0]?.slice(0, 2)).toEqual([
-      'codex',
-      ['app-server', '--listen', `unix://${fixture.socketPath()}`]
+    const [controllerCommand, controllerArgs] = fixture.spawnProcess.mock.calls[0] ?? []
+    expect(controllerCommand).toBe('codex')
+    expect(controllerArgs?.slice(-3)).toEqual([
+      'app-server',
+      '--listen',
+      `unix://${fixture.socketPath()}`
     ])
+    expect(controllerArgs).toContainEqual(
+      expect.stringContaining('mcp_servers.orca_controlled.command=')
+    )
     expect(fixture.terminalLaunches[0]?.command).toMatch(/^'codex' 'resume' /)
   })
 
@@ -123,12 +127,16 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
     await fixture.manager.launchPreparedNew(prepared)
 
     expect(fixture.spawnProcess).toHaveBeenCalledOnce()
-    expect(fixture.spawnProcess.mock.calls[0]?.slice(0, 2)).toEqual([
-      '/opt/Codex Preview/codex',
-      ['--profile', 'work profile', 'app-server', '--listen', `unix://${fixture.socketPath()}`]
+    const [controllerCommand, controllerArgs] = fixture.spawnProcess.mock.calls[0] ?? []
+    expect(controllerCommand).toBe('/opt/Codex Preview/codex')
+    expect(controllerArgs?.slice(0, 2)).toEqual(['--profile', 'work profile'])
+    expect(controllerArgs?.slice(-3)).toEqual([
+      'app-server',
+      '--listen',
+      `unix://${fixture.socketPath()}`
     ])
     expect(fixture.terminalLaunches[0]?.command).toMatch(
-      /^'\/opt\/Codex Preview\/codex' '--profile' 'work profile' '--remote' /
+      /^'\/opt\/Codex Preview\/codex' '--profile' 'work profile' 'resume' '--remote' /
     )
   })
 
@@ -163,9 +171,13 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
     ).rejects.toThrow('ENOENT override')
 
     expect(fixture.spawnProcess).toHaveBeenCalledOnce()
-    expect(fixture.spawnProcess.mock.calls[0]?.slice(0, 2)).toEqual([
-      'codex',
-      ['--profile', 'work', 'app-server', '--listen', `unix://${fixture.socketPath()}`]
+    const [controllerCommand, controllerArgs] = fixture.spawnProcess.mock.calls[0] ?? []
+    expect(controllerCommand).toBe('codex')
+    expect(controllerArgs?.slice(0, 2)).toEqual(['--profile', 'work'])
+    expect(controllerArgs?.slice(-3)).toEqual([
+      'app-server',
+      '--listen',
+      `unix://${fixture.socketPath()}`
     ])
     expect(fixture.terminalLaunches).toHaveLength(0)
   })
@@ -184,22 +196,21 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       disposition: 'created',
       identity: { threadId: 'thread-1' }
     })
-    expect(fixture.terminalLaunches[0]?.threadId).toBeNull()
-    expect(fixture.terminalLaunches[0]?.command).toMatch(/^'codex' '--remote' /)
+    expect(fixture.terminalLaunches[0]?.threadId).toBe('thread-1')
+    expect(fixture.terminalLaunches[0]?.command).toMatch(/^'codex' 'resume' '--remote' /)
     expect(fixture.readinessChecks.value).toBe(1)
     expect(fixture.stub.turnStarts).toBe(1)
   })
 
-  it('cleans up when the visible TUI starts multiple threads during launch', async () => {
+  it('uses only the controller-owned thread when the visible TUI reports unrelated starts', async () => {
     const fixture = createFixture({ visibleThreadIds: ['thread-1', 'thread-2'] })
     const { threadId: _threadId, ...input } = fixture.input
 
     await expect(
-      fixture.manager.launchNew({ ...input, operationId: 'operation-multiple-threads' })
-    ).rejects.toThrow('started multiple threads')
+      fixture.manager.launchNew({ ...input, operationId: 'operation-controller-thread' })
+    ).resolves.toMatchObject({ identity: { threadId: 'thread-1' } })
 
-    expect(fixture.closedTerminals).toHaveLength(1)
-    expect(fixture.processes[0]?.exitCode).toBe(0)
+    expect(fixture.closedTerminals).toHaveLength(0)
   })
 
   it('cleans up after a visible terminal remote-connection failure', async () => {
@@ -253,7 +264,7 @@ describe.skipIf(process.platform === 'win32')('CodexControlledSessionManager', (
       ).rejects.toThrow('controlled Codex launch account changed')
 
       expect(fixture.processes[0]?.exitCode).toBe(0)
-      if (driftAfter === 'initialize') {
+      if (driftAfter === 'initialize' || driftAfter === 'thread/start') {
         expect(fixture.terminalLaunches).toHaveLength(0)
       } else {
         expect(fixture.terminalLaunches).toHaveLength(1)
@@ -743,6 +754,7 @@ function createFixture(
     stateRoot: join(root, 'state'),
     socketRoot,
     spawnProcess,
+    materializeThread: async () => undefined,
     createVisibleTerminal: async (launch) => {
       terminalLaunches.push(launch)
       visibleConnections.push(connectTestTransport(launch.command))

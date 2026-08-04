@@ -7,12 +7,15 @@ type PendingRequest = {
   timer: ReturnType<typeof setTimeout>
 }
 
+type ServerRequestHandler = (method: string, params: Record<string, unknown>) => Promise<unknown>
+
 export class CodexUnixAppServerClient {
   private nextId = 1
   private readonly pending = new Map<number, PendingRequest>()
   private readonly notificationListeners = new Set<
     (method: string, params: Record<string, unknown>) => void
   >()
+  private serverRequestHandler: ServerRequestHandler | null = null
 
   private constructor(private readonly socket: WebSocket) {
     socket.on('message', (data) => this.onMessage(data))
@@ -96,6 +99,15 @@ export class CodexUnixAppServerClient {
     return () => this.notificationListeners.delete(listener)
   }
 
+  onServerRequest(handler: ServerRequestHandler): () => void {
+    this.serverRequestHandler = handler
+    return () => {
+      if (this.serverRequestHandler === handler) {
+        this.serverRequestHandler = null
+      }
+    }
+  }
+
   close(): void {
     this.socket.close()
   }
@@ -105,6 +117,13 @@ export class CodexUnixAppServerClient {
     try {
       message = JSON.parse(data.toString()) as Record<string, unknown>
     } catch {
+      return
+    }
+    if (
+      typeof message.method === 'string' &&
+      (typeof message.id === 'number' || typeof message.id === 'string')
+    ) {
+      void this.handleServerRequest(message.id, message.method, message.params)
       return
     }
     if (typeof message.id === 'number') {
@@ -137,6 +156,34 @@ export class CodexUnixAppServerClient {
       } catch {
         // One observer must not prevent delivery to the remaining observers.
       }
+    }
+  }
+
+  private async handleServerRequest(
+    id: number | string,
+    method: string,
+    rawParams: unknown
+  ): Promise<void> {
+    const handler = this.serverRequestHandler
+    if (!handler) {
+      this.socket.send(
+        JSON.stringify({ id, error: { code: -32601, message: `Unsupported request: ${method}` } })
+      )
+      return
+    }
+    try {
+      const result = await handler(method, isRecord(rawParams) ? rawParams : {})
+      this.socket.send(JSON.stringify({ id, result }))
+    } catch (error) {
+      this.socket.send(
+        JSON.stringify({
+          id,
+          error: {
+            code: -32603,
+            message: error instanceof Error ? error.message : String(error)
+          }
+        })
+      )
     }
   }
 

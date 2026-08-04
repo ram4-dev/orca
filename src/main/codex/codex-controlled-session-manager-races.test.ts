@@ -118,6 +118,42 @@ describe('CodexControlledSessionManager race fences', () => {
 })
 
 describe('CodexControlledTurnFinalizer reconciliation responses', () => {
+  it('starts an accepted first turn when Codex reports the thread unmaterialized', async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === 'thread/read') {
+        throw new Error(
+          'thread thread-1 is not materialized yet; includeTurns is unavailable before first user message'
+        )
+      }
+      return { turn: { id: 'turn-1' } }
+    })
+    const state = {
+      get: vi.fn(() => ({
+        operationId: 'operation-1',
+        clientMessageId: 'operation-1',
+        prompt: 'Check the mailbox.',
+        phase: 'accepted' as const,
+        codexTurnId: null
+      })),
+      put: vi.fn()
+    }
+    const finalizer = new CodexControlledTurnFinalizer(
+      {
+        threadId: 'thread-1',
+        client: { request } as unknown as CodexUnixAppServerClient,
+        state: state as unknown as CodexControlledSessionStateStore
+      },
+      () => true
+    )
+
+    await expect(finalizer.prepareAndFinalize(acceptedTurnRequest())).resolves.toEqual({
+      status: 'finalized',
+      turnId: 'operation-1',
+      duplicate: false
+    })
+    expect(request).toHaveBeenCalledWith('turn/start', expect.anything())
+  })
+
   it.each([
     ['missing turns', undefined],
     ['non-array turns', {}],
@@ -201,6 +237,7 @@ function createFixture() {
     }
   })
   const manager = new CodexControlledSessionManager({
+    materializeThread: async () => undefined,
     stateRoot: '/unused',
     createVisibleTerminal: async () => ({ handle: 'unused' }),
     waitForVisibleTerminal: refreshCalls,
